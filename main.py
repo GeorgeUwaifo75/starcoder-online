@@ -159,6 +159,30 @@ async def patch_user(uid: str, b: dict, u=Depends(usr)):
     return {"ok": True}
 
 
+@app.put("/api/users/{uid}")
+async def edit_user(uid: str, b: dict, u=Depends(usr)):
+    async with lock:
+        x = DB["users"].get(uid)
+        if not x or x["tenant"] != u["tenant"]: raise HTTPException(404, "Not found")
+        if x["role"] == "admin" and u["role"] != "admin": raise HTTPException(403, "Not permitted")
+        first, last, pw, role = (str(b.get(k) or "").strip() for k in ("first", "last", "password", "role"))
+        if first or last:
+            if not (first and last): raise HTTPException(400, "Enter both first and last name")
+            x["name"] = f"{first} {last}"
+        if pw:
+            if len(pw) < 6: raise HTTPException(400, "Password must be at least 6 characters")
+            x["pw"] = hp(pw)
+            if uid != u["id"]:   # force the edited user to log in again with the new password
+                for tok in [k for k, v in SESS.items() if v == uid]: del SESS[tok]
+        if role and role != x["role"]:
+            if uid in (u["id"], u["tenant"]): raise HTTPException(400, "You cannot change your own role or the main administrator's")
+            if role not in ("admin", "semi", "user"): raise HTTPException(400, "Bad role")
+            if role == "admin" and u["role"] != "admin": raise HTTPException(403, "Only administrators can make administrators")
+            x["role"] = role
+        await save()
+    return {"ok": True}
+
+
 @app.delete("/api/users/{uid}")
 async def del_user(uid: str, u=Depends(usr)):
     async with lock:
@@ -295,6 +319,24 @@ async def delete_last(u=Depends(me)):
         root = DB["users"][u["tenant"]]; root["wallet"] += SALE_COST   # refund the units charged for this sale
         await save()
     return {"deleted": s["id"], "wallet": root["wallet"]}
+
+
+@app.post("/api/sales/delete")
+async def delete_sales(b: dict, u=Depends(admin)):
+    ids, t = set(map(str, b.get("ids", []))), u["tenant"]
+    async with lock:
+        hit = [s for s in DB["sales"] if s["tenant"] == t and s["id"] in ids]
+        if not hit: raise HTTPException(404, "No matching transactions")
+        if b.get("restock"):
+            for s in hit:
+                for i in s["items"]:
+                    p = DB["products"].get(f"{t}:{i['code']}")
+                    if p: p["qty"] = round(p["qty"] + i["qty"], 3)
+        root = DB["users"][t]
+        if b.get("refund"): root["wallet"] += SALE_COST * len(hit)
+        DB["sales"] = [s for s in DB["sales"] if not (s["tenant"] == t and s["id"] in ids)]
+        await save()
+    return {"deleted": len(hit), "wallet": root["wallet"]}
 
 
 @app.post("/api/cleanup")
