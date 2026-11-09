@@ -291,8 +291,10 @@ async def delete_last(u=Depends(me)):
         for i in s["items"]:
             p = DB["products"].get(f"{u['tenant']}:{i['code']}")
             if p: p["qty"] = round(p["qty"] + i["qty"], 3)
-        DB["sales"].remove(s); await save()
-    return {"deleted": s["id"]}
+        DB["sales"].remove(s)
+        root = DB["users"][u["tenant"]]; root["wallet"] += SALE_COST   # refund the units charged for this sale
+        await save()
+    return {"deleted": s["id"], "wallet": root["wallet"]}
 
 
 @app.post("/api/cleanup")
