@@ -6,7 +6,8 @@ from fastapi.staticfiles import StaticFiles
 
 E = os.getenv
 API_BASE = E("JSONBIN_API_BASE", "https://jsonbinbro.onrender.com/api")
-BIN_ID, BIN_USER, BIN_KEY = E("JSONBIN_BIN_ID"), E("JSONBIN_USER_ID"), E("JSONBIN_API_KEY")
+BIN_ID, BIN_KEY = E("JSONBIN_BIN_ID"), E("JSONBIN_API_KEY")
+PRIVATE = E("JSONBIN_PRIVATE", "true").lower() != "false"
 SA_ID = E("SUPER_ADMIN_ID", "superadmin")
 SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
@@ -26,14 +27,16 @@ def chk(pw, h): return secrets.compare_digest(hp(pw, h.split("$")[0]), h)
 def num(x, d=0):
     try: return float(x)
     except Exception: return d
-def hdrs(): return {"X-User-ID": BIN_USER or "", "X-API-Key": BIN_KEY or "", "Content-Type": "application/json"}
 
 
 async def save():
     if not BIN_ID: return
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.put(f"{API_BASE}/bins/{BIN_ID}", headers=hdrs(), json=DB)
-        if r.status_code >= 400: raise HTTPException(502, "Storage save failed")
+        r = await c.put(f"{API_BASE}/bins/{BIN_ID}", params={"api_key": BIN_KEY},
+                        json={"data": DB, "name": "StarCoder Online", "is_private": PRIVATE})
+        if r.status_code >= 400:
+            print("JSONBinBro save failed", r.status_code, r.text)
+            raise HTTPException(502, "Storage save failed")
 
 
 @app.on_event("startup")
@@ -42,10 +45,12 @@ async def boot():
     d = None
     if BIN_ID:  # refuse to start on a failed load, so we never overwrite real data with an empty DB
         async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.get(f"{API_BASE}/bins/{BIN_ID}", headers=hdrs())
-            r.raise_for_status()
-            d = r.json()
-            d = d.get("record", d) if isinstance(d, dict) else None
+            r = await c.get(f"{API_BASE}/bins/{BIN_ID}", params={"api_key": BIN_KEY})
+            if r.status_code == 404: d = None          # brand-new bin: start empty
+            elif r.status_code >= 400: raise RuntimeError(f"JSONBinBro load failed {r.status_code}: {r.text}")
+            else:
+                d = r.json()
+                d = d.get("data", d) if isinstance(d, dict) else None
     DB = d if d and "users" in d else {}
     for k, v in KEYS.items(): DB.setdefault(k, type(v)())
     if SA_ID not in DB["users"]:

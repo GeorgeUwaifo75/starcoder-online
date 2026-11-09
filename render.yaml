@@ -8,7 +8,6 @@ services:
       - {key: PYTHON_VERSION, value: 3.11.9}
       - {key: JSONBIN_API_BASE, value: "https://jsonbinbro.onrender.com/api"}
       - {key: JSONBIN_BIN_ID, sync: false}
-      - {key: JSONBIN_USER_ID, sync: false}
       - {key: JSONBIN_API_KEY, sync: false}
       - {key: SUPER_ADMIN_ID, value: superadmin}
       - {key: SUPER_ADMIN_PASSWORD, sync: false}
