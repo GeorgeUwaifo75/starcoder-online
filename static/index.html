@@ -3,7 +3,7 @@
 :root{--b:#1e56c8;--y:#ffb400;--k:#111}
 *{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:#f1f4fa;color:var(--k)}
 header{background:var(--b);color:#fff;padding:8px 14px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;border-bottom:4px solid var(--y)}
-.logo{width:96px;height:75px;border-radius:12px;background:url(/static/logo.jpg) 49% 64%/143%;flex:none}
+.logo{height:42px;width:auto;flex:none;display:block}.logo.big{height:80px;margin:0 auto 6px}
 .sp{flex:1}.pill{background:var(--y);color:var(--k);padding:4px 10px;border-radius:99px;font-weight:700}
 nav{display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px;background:var(--k)}
 nav button{background:none;color:#fff;border:0;padding:8px 12px;border-radius:6px;cursor:pointer}nav button.on{background:var(--y);color:var(--k);font-weight:700}
@@ -12,7 +12,7 @@ main{padding:14px;max-width:1150px;margin:auto}.card{background:#fff;border-radi
 input,select{width:100%;padding:8px;border:1px solid #9ab;border-radius:6px;font-size:15px}
 button{background:var(--b);color:#fff;border:0;padding:8px 14px;border-radius:6px;cursor:pointer;font-size:14px}button.y{background:var(--y);color:var(--k);font-weight:700}button.r{background:#111}
 .w{overflow-x:auto}table{border-collapse:collapse;width:100%}th{background:var(--b);color:#fff;text-align:left}td,th{padding:6px 8px;border-bottom:1px solid #dde}
-.warn{background:var(--y);padding:8px 14px;font-weight:700;text-align:center}h3{margin:0 0 10px;color:var(--b)}.auth{max-width:380px;margin:30px auto}.tot{font-size:18px;text-align:right}
+.warn{background:var(--y);padding:8px 14px;font-weight:700;text-align:center}h3{margin:0 0 10px;color:var(--b)}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;background:linear-gradient(160deg,var(--b),#0d2d73)}.auth{width:100%;max-width:360px;margin:0;border-top:5px solid var(--y)}.tot{font-size:18px;text-align:right}
 </style></head><body><div id="app"></div>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
@@ -32,14 +32,14 @@ async function api(p,m="GET",b){const r=await fetch("/api"+p,{method:m,headers:{
  const j=await r.json().catch(()=>({}));if(r.status==401&&TOK)logout();if(!r.ok)throw new Error(j.detail||"Error");return j}
 const go=async f=>{try{await f()}catch(e){alert(e.message)}};
 function logout(){localStorage.tok=TOK="";authView()}
-function authView(){$("#app").innerHTML=`<div class="auth card"><div class="logo" style="margin:auto;width:150px;height:117px"></div><h3 style="text-align:center">StarCoder Online</h3><div id="af"></div></div>`;loginForm()}
+function authView(){$("#app").innerHTML=`<div class=wrap><div class="auth card"><img class="logo big" src="/static/logo.png" alt="SC Online"><h3 style="text-align:center">StarCoder Online</h3><div id="af"></div></div></div>`;loginForm()}
 function loginForm(){$("#af").innerHTML=`<label>User ID<input id=i></label><label>Password<input id=p type=password></label><br><button class=y onclick="doLogin()">Log in</button> <button class=r onclick="signForm()">Sign up</button>`}
 function signForm(){$("#af").innerHTML=["first:First name","last:Last name","company:Company name","password:Password:password","confirm:Confirm password:password"].map(x=>{const[a,b,t]=x.split(":");return`<label>${b}<input id=s_${a} type=${t||"text"}></label>`}).join("")+`<br><button class=y onclick="doSign()">Create account</button> <button class=r onclick="loginForm()">Back</button>`}
 const doSign=()=>go(async()=>{const b={};for(const k of["first","last","company","password","confirm"])b[k]=$("#s_"+k).value;const r=await api("/signup","POST",b);alert("Account created. Your User ID is: "+r.id+"\n100 wallet units added.");loginForm();$("#i").value=r.id});
 const doLogin=()=>go(async()=>{const r=await api("/login","POST",{id:$("#i").value,password:$("#p").value});TOK=localStorage.tok=r.token;S=r;boot()});
 async function boot(){if(S.user.role!="super")P=await api("/products");const t=S.user.role=="super"?["accounts"]:["sales","products","purchases","reports","users","settings"].filter(x=>({sales:1,products:S.user.role!="user",purchases:S.user.role!="user",reports:can("reports"),users:S.user.role!="user"&&can("users"),settings:S.user.role=="admin"})[x]);
  view=t[0];$("#app").innerHTML=`<header id=hd></header><div id=al></div><nav>${t.map(x=>`<button id=n_${x} onclick="show('${x}')">${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</nav><main id=m></main>`;hdr();show(view)}
-function hdr(){const c=S.company,u=S.user;$("#hd").innerHTML=`<div class=logo></div><div><b>${E(c.name||"StarCoder Online")}</b><br><small>${E(c.address||"")}</small></div>${c.logo?`<img src="${E(c.logo)}" height=44>`:""}<span class=sp></span>${u.role=="super"?"":`<span class=pill>Wallet: ${S.wallet} units</span><span class=pill>Sales: ${S.sales_count}</span>`}<small>${E(u.name)} · ${u.role}</small><button class=y onclick="logout()">Logout</button>`;
+function hdr(){const c=S.company,u=S.user;$("#hd").innerHTML=`<img class=logo src="/static/logo.png" alt="SC Online"><div><b>${E(c.name||"StarCoder Online")}</b><br><small>${E(c.address||"")}</small></div>${c.logo?`<img src="${E(c.logo)}" height=44>`:""}<span class=sp></span>${u.role=="super"?"":`<span class=pill>Wallet: ${S.wallet} units</span><span class=pill>Sales: ${S.sales_count}</span>`}<small>${E(u.name)} · ${u.role}</small><button class=y onclick="logout()">Logout</button>`;
  $("#al").innerHTML=u.role=="admin"&&S.sales_count>=S.system.max_tx?`<div class=warn>${S.sales_count} transactions stored (limit ${S.system.max_tx}). Please run the Clean-up tool in Settings.</div>`:S.wallet<20&&u.role!="super"?`<div class=warn>Wallet low: sales are blocked until units are topped up.</div>`:""}
 setInterval(()=>{if(TOK&&S.user)api("/me").then(r=>{S={...S,...r};hdr()}).catch(()=>{})},15000);
 const V={sales:posV,products:prodV,purchases:purV,reports:repV,users:userV,settings:setV,accounts:accV};
