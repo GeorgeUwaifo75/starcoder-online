@@ -318,9 +318,8 @@ async def delete_last(u=Depends(me)):
             p = DB["products"].get(f"{u['tenant']}:{i['code']}")
             if p: p["qty"] = round(p["qty"] + i["qty"], 3)
         DB["sales"].remove(s)
-        root = DB["users"][u["tenant"]]; root["wallet"] += SALE_COST   # refund the units charged for this sale
-        await save()
-    return {"deleted": s["id"], "wallet": root["wallet"]}
+        await save()   # units are never refunded when a transaction is deleted
+    return {"deleted": s["id"], "wallet": DB["users"][u["tenant"]]["wallet"]}
 
 
 @app.post("/api/sales/delete")
@@ -334,11 +333,9 @@ async def delete_sales(b: dict, u=Depends(admin)):
                 for i in s["items"]:
                     p = DB["products"].get(f"{t}:{i['code']}")
                     if p: p["qty"] = round(p["qty"] + i["qty"], 3)
-        root = DB["users"][t]
-        if b.get("refund"): root["wallet"] += SALE_COST * len(hit)
         DB["sales"] = [s for s in DB["sales"] if not (s["tenant"] == t and s["id"] in ids)]
         await save()
-    return {"deleted": len(hit), "wallet": root["wallet"]}
+    return {"deleted": len(hit), "wallet": DB["users"][t]["wallet"]}
 
 
 @app.post("/api/cleanup")
