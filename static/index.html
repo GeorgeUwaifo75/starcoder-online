@@ -14,7 +14,10 @@ button{background:var(--b);color:#fff;border:0;padding:8px 14px;border-radius:6p
 .w{overflow-x:auto}table{border-collapse:collapse;width:100%}th{background:var(--b);color:#fff;text-align:left}td,th{padding:6px 8px;border-bottom:1px solid #dde}
 .warn{background:var(--y);padding:8px 14px;font-weight:700;text-align:center}h3{margin:0 0 10px;color:var(--b)}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;background:linear-gradient(160deg,var(--b),#0d2d73)}.auth{width:100%;max-width:360px;margin:0;border-top:5px solid var(--y)}.tot{font-size:18px;text-align:right}.ctr{text-align:center;margin-top:16px}.ctr button{min-width:120px}.ph{width:100%;aspect-ratio:4/3;object-fit:contain;background:#eef2fb;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:40px}.pc{border:1px solid #dde;border-radius:10px;padding:10px;background:#fff}.th{width:38px;height:38px;object-fit:cover;border-radius:6px;vertical-align:middle}
 .fa{border-bottom:1px solid #dde;padding:8px 0}.fa summary{cursor:pointer;font-weight:700;color:var(--b)}.fa div{padding:8px 0 4px;line-height:1.55}.fa a{color:var(--b);font-weight:700}
-</style></head><body><div id="app"></div>
+.spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:rot .7s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes rot{to{transform:rotate(360deg)}}
+button:disabled{opacity:.8;cursor:progress}.bz{position:fixed;top:10px;right:10px;background:#fff;color:var(--k);border-radius:99px;padding:6px 14px;box-shadow:0 2px 10px #0005;z-index:99;display:none}
+button.d{background:#d32020;color:#fff}.red h3{color:#d32020}.red th{background:#d32020;color:#fff}.red{border-top:4px solid #d32020}
+</style></head><body><div id="app"></div><div id="bz" class="bz"><span class="spin"></span>Working…</div>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chart.js/4.4.1/chart.umd.min.js"></script>
@@ -31,7 +34,12 @@ let TOK=localStorage.tok||"",S={},P=[],cart=[],view="sales",CUR={};
 const can=p=>S.user.role=="admin"||S.user.perms[p];
 async function api(p,m="GET",b){const r=await fetch("/api"+p,{method:m,headers:{"Content-Type":"application/json",Authorization:TOK},body:b?JSON.stringify(b):undefined});
  const j=await r.json().catch(()=>({}));if(r.status==401&&TOK)logout();if(!r.ok)throw new Error(j.detail||"Error");return j}
-const go=async f=>{try{await f()}catch(e){alert(e.message)}};
+let BZ=0;
+const go=async f=>{const ev=window.event,b=ev&&ev.target&&ev.target.closest?ev.target.closest("button"):null;
+ if(b&&b.dataset.busy)return;BZ++;$("#bz").style.display="block";
+ if(b){b.dataset.busy=1;b.dataset.t=b.innerHTML;b.disabled=true;b.innerHTML='<span class=spin></span>'+b.dataset.t}
+ try{await f()}catch(e){alert(e.message)}
+ finally{if(!--BZ)$("#bz").style.display="none";if(b&&b.isConnected){b.disabled=false;b.innerHTML=b.dataset.t;delete b.dataset.busy}}};
 function logout(){localStorage.tok=TOK="";authView()}
 function authView(){$("#app").innerHTML=`<div class=wrap><div class="auth card"><img class="logo big" src="/static/logo.png" alt="SC Online"><h3 style="text-align:center">StarCoder Online</h3><div id="af"></div></div></div>`;loginForm()}
 function loginForm(){$("#af").innerHTML=`<label>User ID<input id=i></label><label>Password<input id=p type=password></label><div class=ctr><button class=y onclick="doLogin()">Log in</button> <button class=r onclick="signForm()">Sign up</button></div>`}
@@ -84,12 +92,12 @@ let R={};
 async function repV(){R.sales=await api("/sales");R.purchases=[];R.misc=[];if(S.user.role!="user")try{Object.assign(R,await api("/ledger"))}catch(e){}
  R.deleted=[];if(S.user.role=="admin")R.deleted=await api("/deleted");
  P=S.user.role=="super"?[]:await api("/products");const full=S.user.role!="user";
- $("#m").innerHTML=`<div class=card><div class=g>${inp("f1","From","date")}${inp("f2","To","date")}${inp("fp","Product contains")}${inp("fs","Seller ID contains")}</div><br>${["sales",...full?["purchases","pnl","stock","charts"]:[],...S.user.role=="admin"?["deleted"]:[]].map(k=>`<button onclick="rep('${k}')">${k}</button> `).join("")}</div><div class=card id=rp></div>`;rep("sales")}
+ $("#m").innerHTML=`<div class=card><div class=g>${inp("f1","From","date")}${inp("f2","To","date")}${inp("fp","Product contains")}${inp("fs","Seller ID contains")}</div><br>${["sales",...full?["purchases","pnl","stock","charts"]:[],...S.user.role=="admin"?["deleted"]:[]].map(k=>`<button class="${k=="deleted"?"d":""}" onclick="rep('${k}')">${k}</button> `).join("")}</div><div class=card id=rp></div>`;rep("sales")}
 const inR=x=>{const d=x.ts.slice(0,10);return(!$("#f1").value||d>=$("#f1").value)&&(!$("#f2").value||d<=$("#f2").value)};
 const fl=(a,k,id)=>$(id).value?a.filter(x=>String(x[k]).toLowerCase().includes($(id).value.toLowerCase())):a;
 const sl=()=>fl(R.sales.filter(inR),"seller","#fs"),lines=()=>sl().flatMap(s=>s.items.filter(i=>i.name.toLowerCase().includes($("#fp").value.toLowerCase())).map(i=>({...i,s,tax:i.line*s.vat/100})));
 const pl=()=>fl(fl(R.purchases.filter(inR),"name","#fp"),"by","#fs");
-function rep(k){let h,r,t=k;const sum=(a,f)=>a.reduce((x,y)=>x+f(y),0);
+function rep(k){let h,r,t=k;$("#rp").className=k=="deleted"?"card red":"card";const sum=(a,f)=>a.reduce((x,y)=>x+f(y),0);
  if(k=="sales"){h=["Date","Receipt","Seller","Product","Qty","Amount","Tax","Payment"];r=lines().map(i=>[i.s.ts.slice(0,16).replace("T"," "),i.s.id,i.s.seller,i.name,i.qty,i.line.toFixed(2),i.tax.toFixed(2),i.s.payment]);r.push(["TOTAL","","","","",sum(lines(),i=>i.line).toFixed(2),sum(lines(),i=>i.tax).toFixed(2),""])}
  else if(k=="purchases"){h=["Date","Product","Qty","Unit cost","Total","By","Supplier"];r=pl().map(x=>[x.ts.slice(0,10),x.name,x.qty,x.cost,x.total,x.by,x.supplier]);r.push(["TOTAL","","","",sum(pl(),x=>x.total).toFixed(2),"",""])}
  else if(k=="pnl"){const L=lines(),rev=sum(L,i=>i.line),cogs=sum(L,i=>i.qty*i.cost),pu=sum(pl(),x=>x.total),mi=sum(R.misc.filter(inR).filter(x=>x.type=="income"),x=>x.amount),me=sum(R.misc.filter(inR).filter(x=>x.type=="expense"),x=>x.amount);
@@ -108,7 +116,7 @@ function rep(k){let h,r,t=k;const sum=(a,f)=>a.reduce((x,y)=>x+f(y),0);
  CUR={t,h,r};$("#rp").innerHTML=`<h3>${t.toUpperCase()}</h3>${tbl(h,r)}<br><button class=y onclick="exp('csv')">CSV</button> <button class=y onclick="exp('xlsx')">Excel</button> <button class=y onclick="exp('pdf')">PDF</button> <button class=r onclick="prn()">Print</button>`}
 function exp(f){const{t,h,r}=CUR;if(f=="csv"){const s=[h,...r].map(x=>x.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n"),a=document.createElement("a");a.href=URL.createObjectURL(new Blob([s],{type:"text/csv"}));a.download=t+".csv";a.click()}
  else if(f=="xlsx"){const w=XLSX.utils.book_new();XLSX.utils.book_append_sheet(w,XLSX.utils.aoa_to_sheet([h,...r]),t);XLSX.writeFile(w,t+".xlsx")}
- else{const d=new jspdf.jsPDF();d.text(`${S.company.name} - ${t}`,14,12);d.autoTable({head:[h],body:r,startY:18});d.save(t+".pdf")}}
+ else{const d=new jspdf.jsPDF();d.text(`${S.company.name} - ${t}`,14,12);d.autoTable({head:[h],body:r,startY:18,headStyles:{fillColor:t=="deleted"?[211,32,32]:[30,86,200]}});d.save(t+".pdf")}}
 function prn(){const f=document.createElement("iframe");f.style.display="none";document.body.append(f);f.contentDocument.write(`<h3>${E(S.company.name)} — ${E(S.user.name)}</h3>`+$("#rp").querySelector("table").outerHTML+`<style>table{border-collapse:collapse;font:12px sans-serif}td,th{border:1px solid #999;padding:3px}</style>`);f.contentDocument.close();f.contentWindow.print();setTimeout(()=>f.remove(),8000)}
 /* ---------- users ---------- */
 async function userV(){const us=await api("/users"),pk=["reports","users","delete_last"];
