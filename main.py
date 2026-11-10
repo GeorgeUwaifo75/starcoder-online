@@ -12,7 +12,7 @@ SA_ID = E("SUPER_ADMIN_ID", "superadmin")
 SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
 SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back."}
-KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": []}
+KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": []}
 
 app = FastAPI(title="StarCoder Online")
 lock = asyncio.Lock()   # serialises every write -> data integrity (run with ONE worker)
@@ -262,6 +262,10 @@ async def misc(b: dict, u=Depends(stk)):
     return {"ok": True}
 
 
+@app.get("/api/deleted")
+def deleted_log(u=Depends(admin)): return [x for x in DB["deleted"] if x["tenant"] == u["tenant"]]
+
+
 @app.get("/api/ledger")
 def ledger(u=Depends(ledger_ok)):
     t = u["tenant"]
@@ -269,6 +273,12 @@ def ledger(u=Depends(ledger_ok)):
 
 
 # ---------- sales ----------
+def log_delete(u, method, restocked, sale=None, summary=None):
+    """Audit trail: every deleted transaction is kept, with full sale details, for the administrator."""
+    DB["deleted"].append({"id": uuid.uuid4().hex[:8], "tenant": u["tenant"], "ts": now(), "by": u["id"], "by_name": u["name"],
+                          "method": method, "restocked": restocked, "sale": sale, "summary": summary})
+
+
 @app.post("/api/sales")
 async def sell(b: dict, u=Depends(me)):
     t = u["tenant"]
@@ -317,7 +327,7 @@ async def delete_last(u=Depends(me)):
         for i in s["items"]:
             p = DB["products"].get(f"{u['tenant']}:{i['code']}")
             if p: p["qty"] = round(p["qty"] + i["qty"], 3)
-        DB["sales"].remove(s)
+        DB["sales"].remove(s); log_delete(u, "last", True, s)
         await save()   # units are never refunded when a transaction is deleted
     return {"deleted": s["id"], "wallet": DB["users"][u["tenant"]]["wallet"]}
 
@@ -333,6 +343,7 @@ async def delete_sales(b: dict, u=Depends(admin)):
                 for i in s["items"]:
                     p = DB["products"].get(f"{t}:{i['code']}")
                     if p: p["qty"] = round(p["qty"] + i["qty"], 3)
+        for s in hit: log_delete(u, "selected", bool(b.get("restock")), s)
         DB["sales"] = [s for s in DB["sales"] if not (s["tenant"] == t and s["id"] in ids)]
         await save()
     return {"deleted": len(hit), "wallet": DB["users"][t]["wallet"]}
@@ -343,10 +354,12 @@ async def cleanup(b: dict, u=Depends(admin)):
     before = str(b.get("before", ""))
     if len(before) != 10: raise HTTPException(400, "Choose a date")
     async with lock:
-        n = len(DB["sales"])
+        gone = [s for s in DB["sales"] if s["tenant"] == u["tenant"] and s["ts"][:10] < before]
+        if gone:
+            log_delete(u, "cleanup", False, None, {"count": len(gone), "total": round(sum(s["total"] for s in gone), 2), "before": before})
         DB["sales"] = [s for s in DB["sales"] if not (s["tenant"] == u["tenant"] and s["ts"][:10] < before)]
         await save()
-    return {"deleted": n - len(DB["sales"])}
+    return {"deleted": len(gone)}
 
 
 # ---------- settings, backup ----------
@@ -364,7 +377,7 @@ async def settings(b: dict, u=Depends(admin)):
 @app.get("/api/backup")
 def backup(u=Depends(admin)):
     t = u["tenant"]
-    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc")}
+    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc", "deleted")}
     d["products"] = [p for p in DB["products"].values() if p["tenant"] == t]
     d["company"], d["system"] = DB["company"].get(t), DB["system"].get(t)
     return d
@@ -374,7 +387,7 @@ def backup(u=Depends(admin)):
 async def restore(b: dict, u=Depends(admin)):
     t = u["tenant"]
     async with lock:
-        for k in ("sales", "purchases", "misc"):
+        for k in ("sales", "purchases", "misc", "deleted"):
             DB[k] = [x for x in DB[k] if x["tenant"] != t] + [dict(x, tenant=t) for x in b.get(k, [])]
         DB["products"] = {k: v for k, v in DB["products"].items() if v["tenant"] != t}
         for p in b.get("products", []): p["tenant"] = t; DB["products"][f"{t}:{p['code']}"] = p
