@@ -11,7 +11,8 @@ PRIVATE = E("JSONBIN_PRIVATE", "true").lower() != "false"
 SA_ID = E("SUPER_ADMIN_ID", "superadmin")
 SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
-SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back."}
+SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
+CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP")
 KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": []}
 
 app = FastAPI(title="StarCoder Online")
@@ -110,7 +111,8 @@ async def signup(b: dict):
     async with lock:
         uid = new_user(f, l, pw, "admin", None)
         DB["company"][uid] = {"name": co, "address": "", "phone": "", "email": "", "logo": "", "vat": 0}
-        DB["system"][uid] = dict(SYS)
+        es = b.get("lang") == "es"   # Spanish defaults: pesos + Spanish receipt footer
+        DB["system"][uid] = dict(SYS, **({"lang": "es", "currency": "PESO", "footer": "Gracias por su compra. Vuelva pronto."} if es else {}))
         await save()
     return {"id": uid}
 
@@ -369,7 +371,9 @@ async def settings(b: dict, u=Depends(admin)):
     async with lock:
         DB["company"][t] = {k: str(c.get(k, "")) for k in ("name", "address", "phone", "email", "logo")} | {"vat": max(0, num(c.get("vat")))}
         DB["system"][t] = {"max_tx": int(num(s.get("max_tx"), 50000)), "copies": max(1, int(num(s.get("copies"), 1))),
-                           "footer": str(s.get("footer", SYS["footer"]))}
+                           "footer": str(s.get("footer", SYS["footer"])),
+                           "lang": s.get("lang") if s.get("lang") in ("en", "es") else DB["system"].get(t, SYS)["lang"],
+                           "currency": s.get("currency") if s.get("currency") in CURRENCIES else DB["system"].get(t, SYS)["currency"]}
         await save()
     return info(u)
 
