@@ -211,7 +211,9 @@ def add_purchase(u, p, qty, cost, supplier):
 
 
 @app.get("/api/products")
-def products(u=Depends(me)): return [p for p in DB["products"].values() if p["tenant"] == u["tenant"]]
+def products(u=Depends(me)):
+    hide = ("cost", "supplier", "phone") if u["role"] == "user" else ()
+    return [{k: v for k, v in p.items() if k not in hide} for p in DB["products"].values() if p["tenant"] == u["tenant"]]
 
 
 @app.post("/api/products")
@@ -233,7 +235,7 @@ async def edit_product(code: str, b: dict, u=Depends(stk)):
     async with lock:
         old = DB["products"].get(f"{t}:{code}")
         if not old: raise HTTPException(404, "Not found")
-        p = clean({**b, "code": code}, t); p["qty"] = old["qty"]
+        p = clean({**b, "code": code}, t); p["qty"] = old["qty"]; p["image"] = b.get("image") or old.get("image", "")
         DB["products"][f"{t}:{code}"] = p; await save()
     return p
 
