@@ -429,4 +429,8 @@ async def topup(uid: str, b: dict, u=Depends(sup)):
 
 @app.get("/")
 def index(): return FileResponse("static/index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon(): return FileResponse("static/favicon.ico")
 app.mount("/static", StaticFiles(directory="static"), name="static")
