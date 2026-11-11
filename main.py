@@ -1,4 +1,4 @@
-import os, time, uuid, hashlib, secrets, asyncio
+import os, re, copy, time, uuid, hashlib, secrets, asyncio
 import httpx
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import FileResponse
@@ -399,6 +399,186 @@ async def restore(b: dict, u=Depends(admin)):
         if b.get("system"): DB["system"][t] = b["system"]
         await save()
     return {"ok": True}
+
+
+
+# ---------- administrator import tool (Excel / JSON rows sent by the browser) ----------
+IMPORT_MAX = 2000
+ALIASES = {   # accepted column names, normalised: lower-case letters and digits only
+    "company": {"name": ["name", "companyname", "company", "businessname"], "address": ["address"], "phone": ["phone", "telephone", "tel"],
+                "email": ["email", "emailaddress"], "vat": ["vat", "vatpercent", "tax"], "logo": ["logo", "logourl"]},
+    "system": {"max_tx": ["maxtx", "maxtransactions", "maximumnumberoftransactions"], "copies": ["copies", "receiptcopies"],
+               "footer": ["footer", "receiptfooter"], "lang": ["lang", "language"], "currency": ["currency"]},
+    "users": {"id": ["id", "userid"], "first": ["first", "firstname"], "last": ["last", "lastname"], "password": ["password"], "role": ["role"],
+              "reports": ["reports", "viewreports"], "users": ["users", "createusers"], "delete_last": ["deletelast", "deletelasttransaction"],
+              "active": ["active", "status"]},
+    "products": {"code": ["code", "productcode", "barcode", "sku"], "name": ["name", "productname"], "desc": ["desc", "description", "productdescription"],
+                 "cost": ["cost", "costprice", "unitcost"], "ptype": ["ptype", "type", "producttype"], "price": ["price", "salesprice", "sellingprice"],
+                 "w1": ["w1", "wholesale1", "wholesaleprice1"], "w2": ["w2", "wholesale2", "wholesaleprice2"], "discount": ["discount", "discountpercent"],
+                 "qty": ["qty", "quantity", "initialquantity", "stock"], "supplier": ["supplier", "suppliername"], "phone": ["phone", "supplierphone"],
+                 "min": ["min", "minstock", "minimumstock"], "max": ["max", "maxstock", "maximumstock"], "image": ["image", "imageurl", "photo"]}}
+ROLES = {"admin": "admin", "administrator": "admin", "semi": "semi", "semiadmin": "semi", "semiadministrator": "semi", "user": "user", "normal": "user", "normaluser": "user"}
+
+
+def nk(s): return re.sub(r"[^a-z0-9]", "", str(s).lower())
+def pick(nr, typ, f):
+    for a in ALIASES[typ][f]:
+        v = nr.get(a)
+        if v is not None and str(v).strip() != "": return v
+    return None
+def txt(x, n=200):
+    if x is None: return ""
+    if isinstance(x, float) and x.is_integer(): x = int(x)
+    return str(x).strip()[:n]
+def flt(x, label, lo=0, hi=None):
+    if isinstance(x, (int, float)) and not isinstance(x, bool): v = float(x)
+    else:
+        try: v = float(re.sub(r"[^\d.\-]", "", str(x)))
+        except ValueError: raise ValueError(f"{label}: must be a number")
+    if v != v or v < lo or (hi is not None and v > hi):
+        raise ValueError(f"{label}: must be between {lo:g} and {hi:g}" if hi is not None else f"{label}: must be {lo:g} or more")
+    return v
+def tf(x, label="Yes/No"):
+    if x is None: return None
+    s = str(x).strip().lower()
+    if s in ("1", "true", "yes", "y", "x", "active", "on"): return True
+    if s in ("0", "false", "no", "n", "off", "disabled", "inactive"): return False
+    raise ValueError(f"{label}: Yes/No value expected")
+
+
+def imp_product(u, t, nr, mode, seen, dry):
+    P = lambda f: pick(nr, "products", f)
+    D = lambda f, d: d if P(f) is None else P(f)
+    code, name = txt(P("code"), 60), txt(P("name"), 120)
+    if not code or not name: return "error", "Product code and name are required", code or name or "-"
+    if code in seen: return "error", "Duplicate code in file", code
+    seen.add(code)
+    try:
+        cost, price, w1, w2 = (flt(D(f, 0), l) for f, l in (("cost", "Cost"), ("price", "Price"), ("w1", "Wholesale price #1"), ("w2", "Wholesale price #2")))
+        disc = flt(D("discount", 0), "Discount", 0, 100)
+        mn, mx = flt(D("min", 5), "Min stock"), flt(D("max", 20), "Max stock")
+        if mx < mn: raise ValueError("Max stock: must be at least Min stock")
+        pt = nk(D("ptype", "discrete"))
+        if pt in ("discrete", "whole", "unit", "units", "integer"): pt = "discrete"
+        elif pt in ("float", "fractional", "fraction", "decimal", "weight", "volume"): pt = "float"
+        else: raise ValueError("Type: must be discrete or fractional")
+        qty = flt(D("qty", 0), "Initial quantity")
+        if pt == "discrete" and qty != int(qty): raise ValueError("Initial quantity: must be a whole number")
+        img = txt(P("image"), 500)
+        if img and not img.startswith("https://"): raise ValueError("Image: must be an https link")
+    except ValueError as e: return "error", str(e), code
+    key = f"{t}:{code}"; old = DB["products"].get(key)
+    if old and mode != "update": return "skip", "Already exists", code
+    f = {"code": code, "name": name, "cost": cost, "ptype": pt, "price": price, "w1": w1, "w2": w2, "discount": disc,
+         "supplier": txt(P("supplier"), 120), "phone": txt(P("phone"), 40), "min": mn, "max": mx, "tenant": t}
+    if not dry:
+        if old:
+            DB["products"][key] = {**old, **f, "desc": txt(P("desc"), 300) or old.get("desc") or name, "image": img or old.get("image", "")}
+        else:
+            p = DB["products"][key] = {**f, "desc": txt(P("desc"), 300) or name, "image": img, "qty": 0}
+            if qty > 0: add_purchase(u, p, qty, cost, f["supplier"])   # opening stock is recorded as a purchase
+    return ("update" if old else "add"), "", code
+
+
+def imp_user(u, t, nr, mode, seen, dry):
+    P = lambda f: pick(nr, "users", f)
+    uid = txt(P("id"), 80).lower(); first, last, pw = txt(P("first"), 60), txt(P("last"), 60), txt(P("password"), 100)
+    try:
+        role = None
+        if P("role") is not None:
+            role = ROLES.get(nk(P("role")))
+            if not role: raise ValueError("Role: must be administrator, semi or user")
+        flags = {k: tf(P(k), l) for k, l in (("reports", "Reports"), ("users", "Create users"), ("delete_last", "Delete last transaction"))}
+        active = tf(P("active"), "Active")
+        if pw and len(pw) < 6: raise ValueError("Password: must be at least 6 characters")
+        if bool(first) != bool(last): raise ValueError("First and last name are required")
+    except ValueError as e: return "error", str(e), uid or f"{first} {last}".strip() or "-"
+    if uid:
+        if uid in seen: return "error", "Duplicate User ID in file", uid
+        seen.add(uid)
+        x = DB["users"].get(uid)
+        if not x or x["tenant"] != t: return "error", "User ID not found (leave blank to create a new user)", uid
+        if mode != "update": return "skip", "Already exists", uid
+        if uid in (u["id"], t) and ((role and role != x["role"]) or active is False):
+            return "error", "You cannot change your own role, or deactivate yourself", uid
+        if not dry:
+            if first: x["name"] = f"{first} {last}"
+            if role: x["role"] = role
+            if active is not None: x["active"] = active
+            x["perms"] = {**x["perms"], **{k: v for k, v in flags.items() if v is not None}}
+            if pw:
+                x["pw"] = hp(pw)
+                for tok in [k for k, v in SESS.items() if v == uid and uid != u["id"]]: del SESS[tok]
+        return "update", "", uid
+    if not (first and last and pw): return "error", "First and last name and a password are required", f"{first} {last}".strip() or "-"
+    if not dry:
+        new = new_user(first, last, pw, role or "user", t, {k: bool(v) for k, v in flags.items()})
+        if active is False: DB["users"][new]["active"] = False
+        return "add", "", new
+    return "add", "", f"{first}.{last}".lower().replace(" ", "")
+
+
+def imp_company(u, t, nr, mode, seen, dry):
+    G = lambda f: pick(nr, "company", f)
+    try:
+        vat = flt(G("vat"), "VAT", 0, 100) if G("vat") is not None else None
+        email, logo = txt(G("email"), 120), txt(G("logo"), 500)
+        if email and "@" not in email: raise ValueError("Email: not valid")
+        if logo and not logo.startswith("https://"): raise ValueError("Logo: must be an https link")
+    except ValueError as e: return "error", str(e), "-"
+    cur = DB["company"].get(t, {}); new = dict(cur)
+    for f, v in (("name", txt(G("name"), 120)), ("address", txt(G("address"), 200)), ("phone", txt(G("phone"), 40)), ("email", email), ("logo", logo)):
+        if v: new[f] = v
+    if vat is not None: new["vat"] = vat
+    if new == cur: return "skip", "Nothing to import", cur.get("name", "-")
+    if not dry: DB["company"][t] = new
+    return "update", "", new.get("name", "-")
+
+
+def imp_system(u, t, nr, mode, seen, dry):
+    G = lambda f: pick(nr, "system", f)
+    try:
+        mt = int(flt(G("max_tx"), "Max transactions", 1)) if G("max_tx") is not None else None
+        cp = int(flt(G("copies"), "Receipt copies", 1, 10)) if G("copies") is not None else None
+        lang = nk(G("lang")) if G("lang") is not None else None
+        if lang in ("english", "inglés", "ingles"): lang = "en"
+        if lang in ("spanish", "español", "espanol"): lang = "es"
+        if lang is not None and lang not in ("en", "es"): raise ValueError("Language: must be en or es")
+        cur_ = txt(G("currency"), 10).upper() if G("currency") is not None else None
+        if cur_ is not None and cur_ not in CURRENCIES: raise ValueError("Currency: not supported")
+    except ValueError as e: return "error", str(e), "-"
+    cur = DB["system"].get(t, SYS); new = dict(cur)
+    for k, v in (("max_tx", mt), ("copies", cp), ("footer", txt(G("footer"), 200) or None), ("lang", lang), ("currency", cur_)):
+        if v is not None: new[k] = v
+    if new == cur: return "skip", "Nothing to import", "-"
+    if not dry: DB["system"][t] = new
+    return "update", "", new.get("currency", "-")
+
+
+HANDLERS = {"products": imp_product, "users": imp_user, "company": imp_company, "system": imp_system}
+
+
+@app.post("/api/import")
+async def import_data(b: dict, u=Depends(admin)):
+    typ = b.get("type")
+    if typ not in HANDLERS: raise HTTPException(400, "Unknown import type")
+    rows = b.get("rows"); rows = [rows] if isinstance(rows, dict) else rows
+    if not isinstance(rows, list) or not rows: raise HTTPException(400, "No rows found in the file")
+    if len(rows) > IMPORT_MAX: raise HTTPException(400, f"Too many rows (maximum {IMPORT_MAX} per import)")
+    mode, dry, t = ("update" if b.get("mode") == "update" else "add"), bool(b.get("dry_run")), u["tenant"]
+    if typ in ("company", "system"): rows = rows[:1]   # these are single records
+    out, summ = [], {"add": 0, "update": 0, "skip": 0, "error": 0}
+    async with lock:
+        snap = None if dry else copy.deepcopy({k: DB[k] for k in ("users", "company", "system", "products", "purchases")})
+        seen = set()
+        for i, r in enumerate(rows, 1):
+            st, msg, lab = ("error", "Row is not valid", "-") if not isinstance(r, dict) else HANDLERS[typ](u, t, {nk(k): v for k, v in r.items()}, mode, seen, dry)
+            summ[st] += 1; out.append({"row": i, "status": st, "msg": msg, "label": lab})
+        if not dry and (summ["add"] or summ["update"]):
+            try: await save()
+            except Exception:
+                DB.update(snap); raise   # a failed save never leaves a half-applied import in memory
+    return {"dry_run": dry, "summary": summ, "rows": out[:500], "total": len(out)}
 
 
 # ---------- super administrator ----------
