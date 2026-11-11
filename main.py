@@ -12,7 +12,7 @@ SA_ID = E("SUPER_ADMIN_ID", "superadmin")
 SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
 SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
-CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP")
+CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP", "KES", "GHS")
 KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": []}
 
 app = FastAPI(title="StarCoder Online")

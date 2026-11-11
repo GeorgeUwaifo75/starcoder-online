@@ -49,9 +49,9 @@ const FB={apiKey:"AIzaSyBj9wQ04hnfPjowVvEa_yf8_Fq3VXVaH5I",authDomain:"giteksolh
 firebase.initializeApp(FB);
 const up=async(f,d)=>{const r=firebase.storage().ref(`${d}/${Date.now()}_${f.name}`);await r.put(f);return r.getDownloadURL()};
 const $=s=>document.querySelector(s),E=s=>String(s??"").replace(/[&<>"']/g,c=>"&#"+c.charCodeAt(0)+";"),
-money=n=>sym()+(+n||0).toLocaleString(LOC(),{minimumFractionDigits:2,maximumFractionDigits:2});
+money=n=>sym()+(/[A-Za-z]$/.test(sym())?" ":"")+(+n||0).toLocaleString(LOC(),{minimumFractionDigits:2,maximumFractionDigits:2});
 let LANG=localStorage.lang||"en";
-const CURS={NGN:["₦","Naira","Naira"],PESO:["$","Pesos","Pesos"],USD:["US$","US Dollar","Dólar estadounidense"],EUR:["€","Euro","Euro"],GBP:["£","Pound sterling","Libra esterlina"]};
+const CURS={NGN:["₦","Naira","Naira"],PESO:["$","Pesos","Pesos"],USD:["US$","US Dollar","Dólar estadounidense"],EUR:["€","Euro","Euro"],GBP:["£","Pound sterling","Libra esterlina"],KES:["KSh","Kenyan Shilling","Chelín keniano"],GHS:["GH₵","Ghanaian Cedi","Cedi ghanés"]};
 const curKey=()=>(S.system&&S.system.currency)||(LANG=="es"?"PESO":"NGN"),sym=()=>(CURS[curKey()]||CURS.NGN)[0],LOC=()=>LANG=="es"?"es-MX":"en-NG";
 const ES={
 "User ID":"ID de usuario","Password":"Contraseña","Log in":"Iniciar sesión","Sign up":"Registrarse","First name":"Nombre","Last name":"Apellido","Company name":"Nombre de la empresa","Confirm password":"Confirmar contraseña","Create account":"Crear cuenta","Back":"Volver",
@@ -127,7 +127,7 @@ function receipt(s){const c=S.company,sy=S.system,one=`<div style="font:12px mon
 function prodV(){const ED=S.user.role!="user";$("#m").innerHTML=`<div class=card><h3>Find a product <small>(optional)</small></h3><div class=row><input id=pq placeholder="Scan barcode or type product name / code" autocomplete=off>${CAM?`<button class=y onclick="camScan(c=>{$('#pq').value=c;lookup()})">📷</button>`:""}</div><div class="g one" id=pr style="margin-top:10px"></div></div>${ED?`<div class=card><h3>Product</h3><div class=g>${inp("code","Product code (scan or type)")}${inp("name","Product name")}${inp("desc","Description")}${inp("cost","Cost","number",0)}<label>Type<select id=ptype><option value=discrete>Discrete (1,2,3…)</option><option value=float>Fractional (kg, litres)</option></select></label>${inp("price","Sales price","number",0)}${inp("w1","Wholesale price #1","number",0)}${inp("w2","Wholesale price #2","number",0)}${inp("discount","Discount % (optional)","number",0)}${inp("qty","Initial quantity","number",0)}${inp("supplier","Supplier (optional)")}${inp("phone","Supplier phone (optional)")}${inp("min","Min stock","number",5)}${inp("max","Max stock","number",20)}<label>Image<input id=img type=file accept="image/*"></label></div><br><button class=y onclick="saveP()">Save product</button> <button class=r onclick="prodV()">New</button></div>`:""}<div class=card id=pl></div>`;
  if(ED){$("#name").oninput=e=>{if(!$("#desc").dataset.t)$("#desc").value=e.target.value};$("#desc").oninput=e=>e.target.dataset.t=1}
  $("#pq").oninput=lookup;$("#pq").onkeydown=e=>{if(e.key=="Enter")lookup()};
- $("#pl").innerHTML=tbl(ED?["","Code","Name","Qty","Price","Cost",""]:["","Code","Name","Qty","Price"],P.map((p,i)=>[`<!>${img(p,"th")}`,p.code,p.name,p.qty,money(p.price),...ED?[money(p.cost),`<!><button onclick="editP(${i})">Edit</button>`]:[]]),"stack")}
+ paged("pl",ED?["","Code","Name","Qty","Price","Cost",""]:["","Code","Name","Qty","Price"],P.map((p,i)=>[`<!>${img(p,"th")}`,p.code,p.name,p.qty,money(p.price),...ED?[money(p.cost),`<!><button onclick="editP(${i})">Edit</button>`]:[]]),"stack")}
 const okImg=u=>/^https:\/\//.test(u||""),img=(p,c)=>okImg(p.image)?`<img class=${c} src="${E(p.image)}" alt="" loading=lazy>`:(c=="th"?"":`<div class=ph>📦</div>`);
 function lookup(){const q=$("#pq").value.trim().toLowerCase(),r=$("#pr");if(!q){r.innerHTML="";return}
  const a=P.filter(p=>p.code.toLowerCase()==q||p.name.toLowerCase().includes(q)||p.code.toLowerCase().includes(q)).slice(0,12);
@@ -178,6 +178,11 @@ function drawRep(){const{h,body,foot}=CUR,n=body.length,pg=Math.max(1,Math.ceil(
  $("#rt").innerHTML=tbl(h,foot?[...rows,foot]:rows);
  $("#pgr").innerHTML=all?"":`<button onclick="pgTo(1)" ${p<2?"disabled":""}>«</button> <button onclick="pgTo(${p-1})" ${p<2?"disabled":""}>‹ ${LS("Prev","Ant.")}</button> <b>${LS("Page","Página")} ${p} ${LS("of","de")} ${pg}</b> <small>(${n} ${LS("records","registros")})</small> <button onclick="pgTo(${p+1})" ${p>=pg?"disabled":""}>${LS("Next","Sig.")} ›</button> <button onclick="pgTo(${pg})" ${p>=pg?"disabled":""}>»</button>`}
 const pgTo=p=>{CUR.p=p;drawRep()};
+const PGS={};   // simple paginator for the Products list
+function paged(id,h,rows,cl){const s=PGS[id]={p:1,h,rows,cl};drawPg(id)}
+function drawPg(id){const s=PGS[id],n=s.rows.length,pg=Math.max(1,Math.ceil(n/PS));s.p=Math.min(Math.max(1,s.p),pg);const p=s.p,g=x=>`pgGo('${id}',${x})`;
+ $("#"+id).innerHTML=tbl(s.h,s.rows.slice((p-1)*PS,p*PS),s.cl)+`<div class=pgr><button onclick="${g(1)}" ${p<2?"disabled":""}>«</button> <button onclick="${g(p-1)}" ${p<2?"disabled":""}>‹ ${LS("Prev","Ant.")}</button> <b>${LS("Page","Página")} ${p} ${LS("of","de")} ${pg}</b> <small>(${n} ${LS("records","registros")})</small> <button onclick="${g(p+1)}" ${p>=pg?"disabled":""}>${LS("Next","Sig.")} ›</button> <button onclick="${g(pg)}" ${p>=pg?"disabled":""}>»</button></div>`}
+const pgGo=(id,p)=>{PGS[id].p=p;drawPg(id)};
 function exp(f){if((f=="xlsx"&&!window.XLSX)||(f=="pdf"&&!(window.jspdf&&window.jspdf.jsPDF)))return alert(LS("The export library could not be loaded. Check your internet connection and refresh the page.","No se pudo cargar la biblioteca de exportación. Revise su conexión a Internet y actualice la página."));const{t,h,r}=CUR;if(f=="csv"){const s=[h,...r].map(x=>x.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n"),a=document.createElement("a");a.href=URL.createObjectURL(new Blob([s],{type:"text/csv"}));a.download=t+".csv";a.click()}
  else if(f=="xlsx"){const w=XLSX.utils.book_new();XLSX.utils.book_append_sheet(w,XLSX.utils.aoa_to_sheet([h,...r]),t);XLSX.writeFile(w,t+".xlsx")}
  else{const d=new jspdf.jsPDF();d.text(`${S.company.name} - ${t}`,14,12);d.autoTable({head:[h],body:r,startY:18,headStyles:{fillColor:t=="deleted"?[211,32,32]:[30,86,200]}});d.save(t+".pdf")}}
