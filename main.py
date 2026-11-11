@@ -13,7 +13,7 @@ SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
 SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
 CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP", "KES", "GHS")
-KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": []}
+KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": [], "deleted_products": []}
 
 app = FastAPI(title="StarCoder Online")
 lock = asyncio.Lock()   # serialises every write -> data integrity (run with ONE worker)
@@ -110,7 +110,7 @@ async def signup(b: dict):
     if pw != cf: raise HTTPException(400, "Passwords do not match")
     async with lock:
         uid = new_user(f, l, pw, "admin", None)
-        DB["company"][uid] = {"name": co, "address": "", "phone": "", "email": "", "logo": "", "vat": 0}
+        DB["company"][uid] = {"name": co, "address": "", "phone": "", "email": "", "logo": "", "show_logo": True, "vat": 0}
         es = b.get("lang") == "es"   # Spanish defaults: pesos + Spanish receipt footer
         DB["system"][uid] = dict(SYS, **({"lang": "es", "currency": "PESO", "footer": "Gracias por su compra. Vuelva pronto."} if es else {}))
         await save()
@@ -242,6 +242,23 @@ async def edit_product(code: str, b: dict, u=Depends(stk)):
     return p
 
 
+@app.delete("/api/products/{code}")
+async def delete_product(code: str, u=Depends(admin)):
+    t, key = u["tenant"], f"{u['tenant']}:{code}"
+    async with lock:
+        p = DB["products"].pop(key, None)
+        if not p: raise HTTPException(404, "Not found")
+        DB["deleted_products"].append({"id": uuid.uuid4().hex[:8], "tenant": t, "ts": now(), "by": u["id"], "by_name": u["name"], "product": p})
+        try: await save()
+        except Exception:
+            DB["products"][key] = p; DB["deleted_products"].pop(); raise   # failed save: put everything back
+    return {"deleted": code}
+
+
+@app.get("/api/deleted-products")
+def deleted_products(u=Depends(admin)): return [x for x in DB["deleted_products"] if x["tenant"] == u["tenant"]]
+
+
 @app.post("/api/purchases")
 async def purchase(b: dict, u=Depends(stk)):
     async with lock:
@@ -369,7 +386,7 @@ async def cleanup(b: dict, u=Depends(admin)):
 async def settings(b: dict, u=Depends(admin)):
     t, c, s = u["tenant"], b.get("company", {}), b.get("system", {})
     async with lock:
-        DB["company"][t] = {k: str(c.get(k, "")) for k in ("name", "address", "phone", "email", "logo")} | {"vat": max(0, num(c.get("vat")))}
+        DB["company"][t] = {k: str(c.get(k, "")) for k in ("name", "address", "phone", "email", "logo")} | {"vat": max(0, num(c.get("vat"))), "show_logo": bool(c.get("show_logo", True))}
         DB["system"][t] = {"max_tx": int(num(s.get("max_tx"), 50000)), "copies": max(1, int(num(s.get("copies"), 1))),
                            "footer": str(s.get("footer", SYS["footer"])),
                            "lang": s.get("lang") if s.get("lang") in ("en", "es") else DB["system"].get(t, SYS)["lang"],
@@ -381,7 +398,7 @@ async def settings(b: dict, u=Depends(admin)):
 @app.get("/api/backup")
 def backup(u=Depends(admin)):
     t = u["tenant"]
-    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc", "deleted")}
+    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc", "deleted", "deleted_products")}
     d["products"] = [p for p in DB["products"].values() if p["tenant"] == t]
     d["company"], d["system"] = DB["company"].get(t), DB["system"].get(t)
     return d
@@ -391,7 +408,7 @@ def backup(u=Depends(admin)):
 async def restore(b: dict, u=Depends(admin)):
     t = u["tenant"]
     async with lock:
-        for k in ("sales", "purchases", "misc", "deleted"):
+        for k in ("sales", "purchases", "misc", "deleted", "deleted_products"):
             DB[k] = [x for x in DB[k] if x["tenant"] != t] + [dict(x, tenant=t) for x in b.get(k, [])]
         DB["products"] = {k: v for k, v in DB["products"].items() if v["tenant"] != t}
         for p in b.get("products", []): p["tenant"] = t; DB["products"][f"{t}:{p['code']}"] = p
@@ -406,7 +423,7 @@ async def restore(b: dict, u=Depends(admin)):
 IMPORT_MAX = 2000
 ALIASES = {   # accepted column names, normalised: lower-case letters and digits only
     "company": {"name": ["name", "companyname", "company", "businessname"], "address": ["address"], "phone": ["phone", "telephone", "tel"],
-                "email": ["email", "emailaddress"], "vat": ["vat", "vatpercent", "tax"], "logo": ["logo", "logourl"]},
+                "email": ["email", "emailaddress"], "vat": ["vat", "vatpercent", "tax"], "logo": ["logo", "logourl"], "show_logo": ["showlogo", "uselogo"]},
     "system": {"max_tx": ["maxtx", "maxtransactions", "maximumnumberoftransactions"], "copies": ["copies", "receiptcopies"],
                "footer": ["footer", "receiptfooter"], "lang": ["lang", "language"], "currency": ["currency"]},
     "users": {"id": ["id", "userid"], "first": ["first", "firstname"], "last": ["last", "lastname"], "password": ["password"], "role": ["role"],
@@ -525,11 +542,13 @@ def imp_company(u, t, nr, mode, seen, dry):
         email, logo = txt(G("email"), 120), txt(G("logo"), 500)
         if email and "@" not in email: raise ValueError("Email: not valid")
         if logo and not logo.startswith("https://"): raise ValueError("Logo: must be an https link")
+        sl = tf(G("show_logo"), "Show logo")
     except ValueError as e: return "error", str(e), "-"
     cur = DB["company"].get(t, {}); new = dict(cur)
     for f, v in (("name", txt(G("name"), 120)), ("address", txt(G("address"), 200)), ("phone", txt(G("phone"), 40)), ("email", email), ("logo", logo)):
         if v: new[f] = v
     if vat is not None: new["vat"] = vat
+    if sl is not None: new["show_logo"] = sl
     if new == cur: return "skip", "Nothing to import", cur.get("name", "-")
     if not dry: DB["company"][t] = new
     return "update", "", new.get("name", "-")
