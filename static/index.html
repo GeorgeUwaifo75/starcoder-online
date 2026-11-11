@@ -36,10 +36,14 @@ button,input,select{touch-action:manipulation}img{max-width:100%}.g>div{min-widt
 </style></head><body><div id="app"></div><div id="bz" class="bz"><span class="spin"></span>Working…</div>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+<script>window.Chart||document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>')</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>window.XLSX||document.write('<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"><\/script>')</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>window.jspdf||document.write('<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"><\/script>')</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script>(window.jspdf&&window.jspdf.jsPDF&&window.jspdf.jsPDF.API.autoTable)||document.write('<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"><\/script>')</script>
 <script>
 const FB={apiKey:"AIzaSyBj9wQ04hnfPjowVvEa_yf8_Fq3VXVaH5I",authDomain:"giteksolhub-project.firebaseapp.com",projectId:"giteksolhub-project",storageBucket:"giteksolhub-project.firebasestorage.app",messagingSenderId:"917911843059",appId:"1:917911843059:web:0aa2438be6605d1f400786"};
 firebase.initializeApp(FB);
@@ -158,6 +162,7 @@ function rep(k){let h,r,t=k,foot=null;CH.forEach(c=>c.destroy());CH=[];$("#rp").
    return[x.ts.slice(0,16).replace("T"," "),x.by,T(M[x.method]||x.method),s?s.id:"-",s?s.ts.slice(0,16).replace("T"," "):T("before")+" "+x.summary.before,s?s.seller:"-",s?s.items.map(i=>`${i.name} x${i.qty} @${money(i.price)}${i.disc?` (-${i.disc}%)`:""} = ${money(i.line)}`).join("; "):x.summary.count+" "+T("transactions"),s?s.subtotal.toFixed(2):"-",s?s.tax.toFixed(2):"-",s?s.total.toFixed(2):x.summary.total.toFixed(2),s?PL(s.payment):"-",T(x.restocked?"Yes":"No")]})}
  else if(k=="stock"){h=["Code","Product","Qty","Min","Max",cs("Cost"),cs("Stock value"),"Status"];r=P.map(p=>[p.code,p.name,p.qty,p.min,p.max,p.cost,(p.qty*p.cost).toFixed(2),T(p.qty<=p.min?"LOW":p.qty>p.max?"OVER":"OK")])}
  else{const L=lines(),PU=pl();
+  if(typeof Chart=="undefined"){$("#rp").innerHTML=`<p>${LS("The charting library could not be loaded. Check your internet connection (or ad blocker) and refresh the page.","No se pudo cargar la biblioteca de gráficos. Revise su conexión a Internet (o el bloqueador de anuncios) y actualice la página.")}</p>`;return}
   if(!L.length&&!PU.length){$("#rp").innerHTML=`<p><i>${T("No data for this period.")}</i></p>`;return}
   $("#rp").innerHTML=`<div class="g one"><div class=cv><canvas id=c1></canvas></div><div class=cv><canvas id=c2></canvas></div></div><div class=cv><canvas id=c3></canvas></div>`;
   const by={};L.forEach(i=>{const o=by[i.name]??={q:0,rev:0,c:0};o.q+=i.qty;o.rev+=i.line;o.c+=i.qty*i.cost});
@@ -173,7 +178,7 @@ function drawRep(){const{h,body,foot}=CUR,n=body.length,pg=Math.max(1,Math.ceil(
  $("#rt").innerHTML=tbl(h,foot?[...rows,foot]:rows);
  $("#pgr").innerHTML=all?"":`<button onclick="pgTo(1)" ${p<2?"disabled":""}>«</button> <button onclick="pgTo(${p-1})" ${p<2?"disabled":""}>‹ ${LS("Prev","Ant.")}</button> <b>${LS("Page","Página")} ${p} ${LS("of","de")} ${pg}</b> <small>(${n} ${LS("records","registros")})</small> <button onclick="pgTo(${p+1})" ${p>=pg?"disabled":""}>${LS("Next","Sig.")} ›</button> <button onclick="pgTo(${pg})" ${p>=pg?"disabled":""}>»</button>`}
 const pgTo=p=>{CUR.p=p;drawRep()};
-function exp(f){const{t,h,r}=CUR;if(f=="csv"){const s=[h,...r].map(x=>x.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n"),a=document.createElement("a");a.href=URL.createObjectURL(new Blob([s],{type:"text/csv"}));a.download=t+".csv";a.click()}
+function exp(f){if((f=="xlsx"&&!window.XLSX)||(f=="pdf"&&!(window.jspdf&&window.jspdf.jsPDF)))return alert(LS("The export library could not be loaded. Check your internet connection and refresh the page.","No se pudo cargar la biblioteca de exportación. Revise su conexión a Internet y actualice la página."));const{t,h,r}=CUR;if(f=="csv"){const s=[h,...r].map(x=>x.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n"),a=document.createElement("a");a.href=URL.createObjectURL(new Blob([s],{type:"text/csv"}));a.download=t+".csv";a.click()}
  else if(f=="xlsx"){const w=XLSX.utils.book_new();XLSX.utils.book_append_sheet(w,XLSX.utils.aoa_to_sheet([h,...r]),t);XLSX.writeFile(w,t+".xlsx")}
  else{const d=new jspdf.jsPDF();d.text(`${S.company.name} - ${t}`,14,12);d.autoTable({head:[h],body:r,startY:18,headStyles:{fillColor:t=="deleted"?[211,32,32]:[30,86,200]}});d.save(t+".pdf")}}
 function prn(){const f=document.createElement("iframe");f.style.display="none";document.body.append(f);f.contentDocument.write(`<h3>${E(S.company.name)} — ${E(S.user.name)}</h3>`+tbl(CUR.h,CUR.r)+`<style>table{border-collapse:collapse;font:12px sans-serif}td,th{border:1px solid #999;padding:3px}</style>`);f.contentDocument.close();f.contentWindow.print();setTimeout(()=>f.remove(),8000)}
