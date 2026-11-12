@@ -1,5 +1,6 @@
 import os, re, copy, time, uuid, hashlib, secrets, asyncio
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 import httpx
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import FileResponse
@@ -14,7 +15,7 @@ SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
 SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
 CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP", "KES", "GHS")
-KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": [], "counters": {}}
+KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": [], "counters": {}, "documents": [], "doc_counters": {}}
 
 app = FastAPI(title="StarCoder Online")
 lock = asyncio.Lock()   # serialises every write -> data integrity (run with ONE worker)
@@ -171,7 +172,7 @@ async def add_user(b: dict, u=Depends(usr)):
     if role == "admin" and u["role"] != "admin": raise HTTPException(403, "Only administrators can create administrators")
     async with lock:
         uid = new_user(str(b.get("first", "")).strip(), str(b.get("last", "")).strip(), str(b.get("password", "")), role, u["tenant"],
-                       {k: bool(b.get("perms", {}).get(k)) for k in ("reports", "users", "delete_last")})
+                       {k: bool(b.get("perms", {}).get(k)) for k in ("reports", "users", "delete_last", "invoices")})
         await save()
     return {"id": uid}
 
@@ -183,7 +184,7 @@ async def patch_user(uid: str, b: dict, u=Depends(usr)):
         if not x or x["tenant"] != u["tenant"] or uid in (u["id"], u["tenant"]): raise HTTPException(404, "Not found")
         if x["role"] == "admin" and u["role"] != "admin": raise HTTPException(403, "Not permitted")
         if "active" in b: x["active"] = bool(b["active"])
-        if "perms" in b: x["perms"] = {k: bool(b["perms"].get(k)) for k in ("reports", "users", "delete_last")}
+        if "perms" in b: x["perms"] = {k: bool(b["perms"].get(k)) for k in ("reports", "users", "delete_last", "invoices")}
         await save()
     return {"ok": True}
 
@@ -413,7 +414,7 @@ async def cleanup(b: dict, u=Depends(admin)):
 async def settings(b: dict, u=Depends(admin), x_tz: str = Header("0")):
     t, c, s = u["tenant"], b.get("company", {}), b.get("system", {})
     async with lock:
-        DB["company"][t] = {k: str(c.get(k, "")) for k in ("name", "address", "phone", "email", "logo")} | {"vat": max(0, num(c.get("vat"))), "show_logo": bool(c.get("show_logo", True))}
+        DB["company"][t] = {k: str(c.get(k, "")) for k in ("name", "address", "phone", "email", "logo")} | {"vat": max(0, num(c.get("vat"))), "show_logo": bool(c.get("show_logo", True)), "invoice_notes": str(c.get("invoice_notes", ""))[:1000]}
         DB["system"][t] = {"max_tx": int(num(s.get("max_tx"), 50000)), "copies": max(1, int(num(s.get("copies"), 1))),
                            "footer": str(s.get("footer", SYS["footer"])),
                            "lang": s.get("lang") if s.get("lang") in ("en", "es") else DB["system"].get(t, SYS)["lang"],
@@ -425,7 +426,7 @@ async def settings(b: dict, u=Depends(admin), x_tz: str = Header("0")):
 @app.get("/api/backup")
 def backup(u=Depends(admin)):
     t = u["tenant"]
-    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc", "deleted")}
+    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc", "deleted", "documents")}
     d["products"] = [p for p in DB["products"].values() if p["tenant"] == t]
     d["company"], d["system"] = DB["company"].get(t), DB["system"].get(t)
     return d
@@ -435,8 +436,11 @@ def backup(u=Depends(admin)):
 async def restore(b: dict, u=Depends(admin)):
     t = u["tenant"]
     async with lock:
-        for k in ("sales", "purchases", "misc", "deleted"):
+        for k in ("sales", "purchases", "misc", "deleted", "documents"):
             DB[k] = [x for x in DB[k] if x["tenant"] != t] + [dict(x, tenant=t) for x in b.get(k, [])]
+        cnt = DB["doc_counters"].setdefault(t, {})   # numbering carries on after the highest restored number, never backwards
+        for d in DB["documents"]:
+            if d["tenant"] == t: cnt[d["type"]] = max(cnt.get(d["type"], 0), d.get("seq", 0))
         DB["products"] = {k: v for k, v in DB["products"].items() if v["tenant"] != t}
         for p in b.get("products", []): p["tenant"] = t; DB["products"][f"{t}:{p['code']}"] = p
         if b.get("company"): DB["company"][t] = b["company"]
@@ -454,7 +458,7 @@ ALIASES = {   # accepted column names, normalised: lower-case letters and digits
     "system": {"max_tx": ["maxtx", "maxtransactions", "maximumnumberoftransactions"], "copies": ["copies", "receiptcopies"],
                "footer": ["footer", "receiptfooter"], "lang": ["lang", "language"], "currency": ["currency"]},
     "users": {"id": ["id", "userid"], "first": ["first", "firstname"], "last": ["last", "lastname"], "password": ["password"], "role": ["role"],
-              "reports": ["reports", "viewreports"], "users": ["users", "createusers"], "delete_last": ["deletelast", "deletelasttransaction"],
+              "reports": ["reports", "viewreports"], "users": ["users", "createusers"], "delete_last": ["deletelast", "deletelasttransaction"], "invoices": ["invoices", "createinvoices"],
               "active": ["active", "status"]},
     "products": {"code": ["code", "productcode", "barcode", "sku"], "name": ["name", "productname"], "desc": ["desc", "description", "productdescription"],
                  "cost": ["cost", "costprice", "unitcost"], "ptype": ["ptype", "type", "producttype"], "price": ["price", "salesprice", "sellingprice"],
@@ -532,7 +536,7 @@ def imp_user(u, t, nr, mode, seen, dry):
         if P("role") is not None:
             role = ROLES.get(nk(P("role")))
             if not role: raise ValueError("Role: must be administrator, semi or user")
-        flags = {k: tf(P(k), l) for k, l in (("reports", "Reports"), ("users", "Create users"), ("delete_last", "Delete last transaction"))}
+        flags = {k: tf(P(k), l) for k, l in (("reports", "Reports"), ("users", "Create users"), ("delete_last", "Delete last transaction"), ("invoices", "Invoices"))}
         active = tf(P("active"), "Active")
         if pw and len(pw) < 6: raise ValueError("Password: must be at least 6 characters")
         if bool(first) != bool(last): raise ValueError("First and last name are required")
@@ -625,6 +629,91 @@ async def import_data(b: dict, u=Depends(admin)):
             except Exception:
                 DB.update(snap); raise   # a failed save never leaves a half-applied import in memory
     return {"dry_run": dry, "summary": summ, "rows": out[:500], "total": len(out)}
+
+
+
+# ---------- invoices and quotations ----------
+DOC_TYPES = ("invoice", "quote")
+def docs_ok(u=Depends(me)):
+    if u["role"] == "super" or not can(u, "invoices"): raise HTTPException(403, "Not permitted")
+    return u
+def r2(x):   # money rounding: half-up, identical to the browser's, so the on-screen total always equals the saved total
+    return float(Decimal(str(round(x, 6))).quantize(Decimal("0.01"), ROUND_HALF_UP))
+def day_ok(x): return isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", x) is not None
+
+
+def clean_doc(b):
+    cu = b.get("customer") or {}; name = str(cu.get("name", "")).strip()[:120]
+    if not name: raise HTTPException(400, "Customer name is required")
+    raw = b.get("items") or []
+    if not raw: raise HTTPException(400, "Add at least one line item")
+    if len(raw) > 100: raise HTTPException(400, "Too many lines (maximum 100)")
+    items, sub = [], 0.0
+    for it in raw:
+        desc = str(it.get("desc", "")).strip()[:200]
+        if not desc: raise HTTPException(400, "Each line needs a description")
+        q, pr, dc = num(it.get("qty")), num(it.get("price")), num(it.get("disc"))
+        if q <= 0: raise HTTPException(400, "Quantity must be greater than 0")
+        if pr < 0: raise HTTPException(400, "Unit price cannot be negative")
+        if not 0 <= dc <= 100: raise HTTPException(400, "Discount must be between 0 and 100")
+        line = r2(q * pr * (1 - dc / 100)); sub += line
+        items.append({"desc": desc, "qty": q, "price": pr, "disc": dc, "line": line})
+    vat = num(b.get("vat"))
+    if not 0 <= vat <= 100: raise HTTPException(400, "VAT must be between 0 and 100")
+    date, due = str(b.get("date", "")), str(b.get("due") or "")
+    if not day_ok(date) or (due and not day_ok(due)): raise HTTPException(400, "Enter a valid date")
+    sub = r2(sub); tax = r2(sub * vat / 100)
+    return {"customer": {"name": name, "address": str(cu.get("address", ""))[:200], "phone": str(cu.get("phone", ""))[:40], "email": str(cu.get("email", ""))[:120]},
+            "date": date, "due": due, "items": items, "vat": vat, "subtotal": sub, "tax": tax, "total": r2(sub + tax), "notes": str(b.get("notes", ""))[:1000]}
+
+
+@app.get("/api/documents")
+def list_docs(u=Depends(docs_ok)):
+    see_all = u["role"] in ("admin", "semi")   # normal users only see the documents they made themselves
+    return [d for d in DB["documents"] if d["tenant"] == u["tenant"] and (see_all or d["by"] == u["id"])]
+
+
+@app.post("/api/documents")
+async def create_doc(b: dict, u=Depends(docs_ok)):
+    typ, t = b.get("type"), u["tenant"]
+    if typ not in DOC_TYPES: raise HTTPException(400, "Bad document type")
+    body = clean_doc(b)
+    async with lock:
+        cnt = DB["doc_counters"].setdefault(t, {}); before = dict(cnt); cnt[typ] = cnt.get(typ, 0) + 1   # numbers are never reused
+        sy = DB["system"].get(t, SYS); es = sy.get("lang") == "es"
+        pre = {"invoice": "FAC" if es else "INV", "quote": "COT" if es else "QUO"}[typ]
+        d = {"id": uuid.uuid4().hex[:8].upper(), "tenant": t, "type": typ, "seq": cnt[typ], "number": f"{pre}-{cnt[typ]:04d}", "ts": now(),
+             "by": u["id"], "by_name": u["name"], "currency": sy.get("currency", "NGN"), **body}
+        DB["documents"].append(d)
+        try: await save()
+        except Exception:
+            DB["documents"].remove(d); DB["doc_counters"][t] = before; raise
+    return d
+
+
+@app.put("/api/documents/{did}")
+async def edit_doc(did: str, b: dict, u=Depends(docs_ok)):
+    body = clean_doc(b)
+    async with lock:
+        d = next((x for x in DB["documents"] if x["id"] == did and x["tenant"] == u["tenant"]), None)
+        if not d or not (u["role"] == "admin" or d["by"] == u["id"]): raise HTTPException(404, "Not found")
+        old = dict(d); d.update(body, edited=now())
+        try: await save()
+        except Exception:
+            d.clear(); d.update(old); raise
+    return d
+
+
+@app.delete("/api/documents/{did}")
+async def delete_doc(did: str, u=Depends(docs_ok)):
+    async with lock:
+        d = next((x for x in DB["documents"] if x["id"] == did and x["tenant"] == u["tenant"]), None)
+        if not d or not (u["role"] == "admin" or d["by"] == u["id"]): raise HTTPException(404, "Not found")
+        i = DB["documents"].index(d); DB["documents"].remove(d)
+        try: await save()
+        except Exception:
+            DB["documents"].insert(i, d); raise
+    return {"deleted": did}
 
 
 # ---------- super administrator ----------
