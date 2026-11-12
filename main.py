@@ -14,7 +14,7 @@ SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
 SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
 CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP", "KES", "GHS")
-KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": []}
+KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": [], "counters": {}}
 
 app = FastAPI(title="StarCoder Online")
 lock = asyncio.Lock()   # serialises every write -> data integrity (run with ONE worker)
@@ -41,6 +41,17 @@ async def save():
             raise HTTPException(502, "Storage save failed")
 
 
+def backfill_seq():
+    """Tickets made before numbering existed get daily numbers too (by UTC day, in time order); the counter then continues from there."""
+    old = sorted((s for s in DB["sales"] if "seq" not in s), key=lambda s: s["ts"]); per = {}
+    for s in old:
+        k = (s["tenant"], s["ts"][:10]); per[k] = per.get(k, 0) + 1; s["seq"], s["day"] = per[k], k[1]
+    for (t, d), n in per.items():
+        c = DB["counters"].get(t)
+        if not c or d > c["day"] or (d == c["day"] and n > c["n"]): DB["counters"][t] = {"day": d, "n": n}
+    return bool(old)
+
+
 @app.on_event("startup")
 async def boot():
     global DB
@@ -55,6 +66,7 @@ async def boot():
                 d = d.get("data", d) if isinstance(d, dict) else None
     DB = d if d and "users" in d else {}
     for k, v in KEYS.items(): DB.setdefault(k, type(v)())
+    if backfill_seq(): await save()
     if SA_ID not in DB["users"]:
         DB["users"][SA_ID] = {"id": SA_ID, "name": "Super Administrator", "role": "super", "pw": hp(SA_PW),
                               "active": True, "tenant": None, "wallet": 0, "perms": {}}
@@ -305,7 +317,7 @@ def log_delete(u, method, restocked, sale=None, summary=None):
 
 
 @app.post("/api/sales")
-async def sell(b: dict, u=Depends(me)):
+async def sell(b: dict, u=Depends(me), x_tz: str = Header("0")):
     t = u["tenant"]
     if u["role"] == "super": raise HTTPException(403, "Not permitted")
     pay = b.get("payment", "cash")
@@ -327,12 +339,21 @@ async def sell(b: dict, u=Depends(me)):
             line = round(q * p[tier] * (1 - d / 100), 2); sub += line
             items.append({"code": p["code"], "name": p["name"], "qty": q, "price": p[tier], "disc": d, "line": line, "cost": p["cost"]})
         if not items: raise HTTPException(400, "Cart is empty")
+        prev = {c: DB["products"][f"{t}:{c}"]["qty"] for c in left}
         for c, q in left.items(): DB["products"][f"{t}:{c}"]["qty"] = round(q, 3)
         sub = round(sub, 2); tax = round(sub * vat / 100, 2)
-        sale = {"id": uuid.uuid4().hex[:8].upper(), "tenant": t, "seller": u["id"], "seller_name": u["name"], "ts": now(),
+        # daily ticket number: 1, 2, 3 ... for the whole company (all users), restarting at 1 each day; numbers are never reused
+        day = local_day(now(), tzm(x_tz)); cnt = DB["counters"].setdefault(t, {"day": day, "n": 0}); before = dict(cnt)
+        if day > cnt["day"]: cnt["day"], cnt["n"] = day, 0
+        cnt["n"] += 1
+        sale = {"id": uuid.uuid4().hex[:8].upper(), "tenant": t, "seller": u["id"], "seller_name": u["name"], "ts": now(), "seq": cnt["n"], "day": cnt["day"],
                 "payment": pay, "items": items, "subtotal": sub, "vat": vat, "tax": tax, "total": round(sub + tax, 2)}
         DB["sales"].append(sale); root["wallet"] -= SALE_COST
-        await save()
+        try: await save()
+        except Exception:   # nothing half-done: undo the sale, the stock, the wallet and the ticket number
+            DB["sales"].remove(sale); root["wallet"] += SALE_COST; cnt.update(before)
+            for c, q in prev.items(): DB["products"][f"{t}:{c}"]["qty"] = q
+            raise
     return {"sale": sale, "wallet": root["wallet"]}
 
 
