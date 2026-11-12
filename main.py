@@ -1,4 +1,5 @@
 import os, re, copy, time, uuid, hashlib, secrets, asyncio
+from datetime import datetime, timedelta
 import httpx
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import FileResponse
@@ -13,7 +14,7 @@ SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
 SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
 CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP", "KES", "GHS")
-KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": [], "deleted_products": []}
+KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": []}
 
 app = FastAPI(title="StarCoder Online")
 lock = asyncio.Lock()   # serialises every write -> data integrity (run with ONE worker)
@@ -84,12 +85,26 @@ def ledger_ok(u=Depends(me)):
     return u
 
 
-def info(u):
+def tzm(x):
+    """Browser time-zone offset in minutes (JavaScript getTimezoneOffset: UTC minus local), so "today" means the user's own day."""
+    try: return max(-840, min(840, int(x)))
+    except Exception: return 0
+def local_day(ts, tz): return (datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ") - timedelta(minutes=tz)).strftime("%Y-%m-%d")
+def sales_today(u, tz):
+    """Sales made today (local day): administrators/semi-administrators see every user's sales, normal users only their own."""
+    t, today = u["tenant"], local_day(now(), tz)
+    d = datetime.strptime(today, "%Y-%m-%d"); near = {(d + timedelta(days=k)).strftime("%Y-%m-%d") for k in (-1, 0, 1)}
+    every = u["role"] in ("admin", "semi")
+    return sum(1 for s in DB["sales"] if s["tenant"] == t and s["ts"][:10] in near and (every or s["seller"] == u["id"]) and local_day(s["ts"], tz) == today)
+
+
+def info(u, tz=0):
     t = u["tenant"]; root = DB["users"].get(t)
     return {"user": {k: u[k] for k in ("id", "name", "role", "perms")},
             "company": DB["company"].get(t, {}), "system": DB["system"].get(t, SYS),
             "wallet": root["wallet"] if root else 0,
-            "sales_count": sum(1 for s in DB["sales"] if s["tenant"] == t)}
+            "sales_count": sales_today(u, tz) if t else 0,            # today's sales for this user's view
+            "sales_total": sum(1 for s in DB["sales"] if s["tenant"] == t)}   # all stored transactions (clean-up alert)
 
 
 def new_user(first, last, pw, role, tenant, perms=None):
@@ -118,17 +133,17 @@ async def signup(b: dict):
 
 
 @app.post("/api/login")
-async def login(b: dict):
+async def login(b: dict, x_tz: str = Header("0")):
     u = DB["users"].get(str(b.get("id", "")).strip().lower())
     if not u or not chk(str(b.get("password", "")), u["pw"]): raise HTTPException(401, "Invalid user ID or password")
     if not u["active"]: raise HTTPException(403, "Account deactivated")
     if u["tenant"] and not DB["users"][u["tenant"]]["active"]: raise HTTPException(403, "Company account deactivated")
     t = secrets.token_hex(24); SESS[t] = u["id"]
-    return {"token": t, **info(u)}
+    return {"token": t, **info(u, tzm(x_tz))}
 
 
 @app.get("/api/me")
-def whoami(u=Depends(me)): return info(u)
+def whoami(u=Depends(me), x_tz: str = Header("0")): return info(u, tzm(x_tz))
 
 
 # ---------- users ----------
@@ -244,19 +259,10 @@ async def edit_product(code: str, b: dict, u=Depends(stk)):
 
 @app.delete("/api/products/{code}")
 async def delete_product(code: str, u=Depends(admin)):
-    t, key = u["tenant"], f"{u['tenant']}:{code}"
     async with lock:
-        p = DB["products"].pop(key, None)
-        if not p: raise HTTPException(404, "Not found")
-        DB["deleted_products"].append({"id": uuid.uuid4().hex[:8], "tenant": t, "ts": now(), "by": u["id"], "by_name": u["name"], "product": p})
-        try: await save()
-        except Exception:
-            DB["products"][key] = p; DB["deleted_products"].pop(); raise   # failed save: put everything back
+        if not DB["products"].pop(f"{u['tenant']}:{code}", None): raise HTTPException(404, "Not found")
+        await save()
     return {"deleted": code}
-
-
-@app.get("/api/deleted-products")
-def deleted_products(u=Depends(admin)): return [x for x in DB["deleted_products"] if x["tenant"] == u["tenant"]]
 
 
 @app.post("/api/purchases")
@@ -332,7 +338,7 @@ async def sell(b: dict, u=Depends(me)):
 
 @app.get("/api/sales")
 def sales(u=Depends(me)):
-    own = not can(u, "reports")
+    own = u["role"] == "user" or not can(u, "reports")   # normal users only ever see the sales made under their own account
     return [s for s in DB["sales"] if s["tenant"] == u["tenant"] and (not own or s["seller"] == u["id"])]
 
 
@@ -383,7 +389,7 @@ async def cleanup(b: dict, u=Depends(admin)):
 
 # ---------- settings, backup ----------
 @app.put("/api/settings")
-async def settings(b: dict, u=Depends(admin)):
+async def settings(b: dict, u=Depends(admin), x_tz: str = Header("0")):
     t, c, s = u["tenant"], b.get("company", {}), b.get("system", {})
     async with lock:
         DB["company"][t] = {k: str(c.get(k, "")) for k in ("name", "address", "phone", "email", "logo")} | {"vat": max(0, num(c.get("vat"))), "show_logo": bool(c.get("show_logo", True))}
@@ -392,13 +398,13 @@ async def settings(b: dict, u=Depends(admin)):
                            "lang": s.get("lang") if s.get("lang") in ("en", "es") else DB["system"].get(t, SYS)["lang"],
                            "currency": s.get("currency") if s.get("currency") in CURRENCIES else DB["system"].get(t, SYS)["currency"]}
         await save()
-    return info(u)
+    return info(u, tzm(x_tz))
 
 
 @app.get("/api/backup")
 def backup(u=Depends(admin)):
     t = u["tenant"]
-    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc", "deleted", "deleted_products")}
+    d = {k: [x for x in DB[k] if x["tenant"] == t] for k in ("sales", "purchases", "misc", "deleted")}
     d["products"] = [p for p in DB["products"].values() if p["tenant"] == t]
     d["company"], d["system"] = DB["company"].get(t), DB["system"].get(t)
     return d
@@ -408,7 +414,7 @@ def backup(u=Depends(admin)):
 async def restore(b: dict, u=Depends(admin)):
     t = u["tenant"]
     async with lock:
-        for k in ("sales", "purchases", "misc", "deleted", "deleted_products"):
+        for k in ("sales", "purchases", "misc", "deleted"):
             DB[k] = [x for x in DB[k] if x["tenant"] != t] + [dict(x, tenant=t) for x in b.get(k, [])]
         DB["products"] = {k: v for k, v in DB["products"].items() if v["tenant"] != t}
         for p in b.get("products", []): p["tenant"] = t; DB["products"][f"{t}:{p['code']}"] = p
