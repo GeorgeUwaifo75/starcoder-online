@@ -13,13 +13,36 @@ PRIVATE = E("JSONBIN_PRIVATE", "true").lower() != "false"
 SA_ID = E("SUPER_ADMIN_ID", "superadmin")
 SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
-SYS = {"max_tx": 50000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
+SYS = {"max_tx": 20000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
 CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP", "KES", "GHS")
 KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": [], "counters": {}, "documents": [], "doc_counters": {}}
 
 app = FastAPI(title="StarCoder Online")
 lock = asyncio.Lock()   # serialises every write -> data integrity (run with ONE worker)
 DB, SESS = {}, {}
+LISTS = ("sales", "purchases", "misc", "deleted", "documents")   # append/remove-only record lists
+
+
+def _snap():
+    """Snapshot of everything a write can touch. One level of copies is enough: records are flat dicts (users also hold a small perms dict)."""
+    d = {k: {a: dict(b) for a, b in DB[k].items()} for k in ("company", "system", "products", "counters", "doc_counters")}
+    d["users"] = {a: {**b, "perms": dict(b.get("perms", {}))} for a, b in DB["users"].items()}
+    for k in LISTS: d[k] = DB[k][:]
+    return d
+
+
+class Tx:
+    """All-or-nothing write. Takes the lock, snapshots the data, and puts EVERYTHING back if anything inside fails:
+    a validation error, a bug, or a failed save. A request that ends in an error therefore never changes data."""
+    async def __aenter__(self):
+        await lock.acquire(); self.s = _snap(); return self
+    async def __aexit__(self, et, ev, tb):
+        try:
+            if et is not None:
+                for k, v in self.s.items(): DB[k] = v
+        finally: lock.release()
+        return False
+
 
 
 def now(): return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -67,7 +90,10 @@ async def boot():
                 d = d.get("data", d) if isinstance(d, dict) else None
     DB = d if d and "users" in d else {}
     for k, v in KEYS.items(): DB.setdefault(k, type(v)())
-    if backfill_seq(): await save()
+    moved = False
+    for sy in DB["system"].values():   # the previous default (50,000) is too high for this storage design: companies still on it move to 20,000
+        if sy.get("max_tx") == 50000: sy["max_tx"] = 20000; moved = True
+    if backfill_seq() or moved: await save()
     if SA_ID not in DB["users"]:
         DB["users"][SA_ID] = {"id": SA_ID, "name": "Super Administrator", "role": "super", "pw": hp(SA_PW),
                               "active": True, "tenant": None, "wallet": 0, "perms": {}}
@@ -136,7 +162,7 @@ async def signup(b: dict):
     f, l, pw, cf, co = [str(b.get(k, "")).strip() for k in ("first", "last", "password", "confirm", "company")]
     if not co: raise HTTPException(400, "Company name is required")
     if pw != cf: raise HTTPException(400, "Passwords do not match")
-    async with lock:
+    async with Tx():
         uid = new_user(f, l, pw, "admin", None)
         DB["company"][uid] = {"name": co, "address": "", "phone": "", "email": "", "logo": "", "show_logo": True, "vat": 0}
         es = b.get("lang") == "es"   # Spanish defaults: pesos + Spanish receipt footer
@@ -170,7 +196,7 @@ async def add_user(b: dict, u=Depends(usr)):
     role = b.get("role")
     if role not in ("admin", "semi", "user"): raise HTTPException(400, "Bad role")
     if role == "admin" and u["role"] != "admin": raise HTTPException(403, "Only administrators can create administrators")
-    async with lock:
+    async with Tx():
         uid = new_user(str(b.get("first", "")).strip(), str(b.get("last", "")).strip(), str(b.get("password", "")), role, u["tenant"],
                        {k: bool(b.get("perms", {}).get(k)) for k in ("reports", "users", "delete_last", "invoices")})
         await save()
@@ -179,7 +205,7 @@ async def add_user(b: dict, u=Depends(usr)):
 
 @app.patch("/api/users/{uid}")
 async def patch_user(uid: str, b: dict, u=Depends(usr)):
-    async with lock:
+    async with Tx():
         x = DB["users"].get(uid)
         if not x or x["tenant"] != u["tenant"] or uid in (u["id"], u["tenant"]): raise HTTPException(404, "Not found")
         if x["role"] == "admin" and u["role"] != "admin": raise HTTPException(403, "Not permitted")
@@ -191,7 +217,7 @@ async def patch_user(uid: str, b: dict, u=Depends(usr)):
 
 @app.put("/api/users/{uid}")
 async def edit_user(uid: str, b: dict, u=Depends(usr)):
-    async with lock:
+    async with Tx():
         x = DB["users"].get(uid)
         if not x or x["tenant"] != u["tenant"]: raise HTTPException(404, "Not found")
         if x["role"] == "admin" and u["role"] != "admin": raise HTTPException(403, "Not permitted")
@@ -215,7 +241,7 @@ async def edit_user(uid: str, b: dict, u=Depends(usr)):
 
 @app.delete("/api/users/{uid}")
 async def del_user(uid: str, u=Depends(usr)):
-    async with lock:
+    async with Tx():
         x = DB["users"].get(uid)
         if not x or x["tenant"] != u["tenant"] or uid in (u["id"], u["tenant"]): raise HTTPException(404, "Not found")
         if x["role"] == "admin" and u["role"] != "admin": raise HTTPException(403, "Not permitted")
@@ -249,11 +275,11 @@ def products(u=Depends(me)):
 @app.post("/api/products")
 async def add_product(b: dict, u=Depends(stk)):
     t = u["tenant"]; p = clean(b, t); key = f"{t}:{p['code']}"
-    async with lock:
+    async with Tx():
         if key in DB["products"]: raise HTTPException(400, "Product code already exists")
-        p["qty"] = 0; DB["products"][key] = p
         q = num(b.get("qty"))
         if q < 0: raise HTTPException(400, "Quantity cannot be negative")
+        p["qty"] = 0; DB["products"][key] = p
         if q > 0: add_purchase(u, p, q, p["cost"], p["supplier"])   # new product = new purchase transaction
         await save()
     return p
@@ -262,7 +288,7 @@ async def add_product(b: dict, u=Depends(stk)):
 @app.put("/api/products/{code}")
 async def edit_product(code: str, b: dict, u=Depends(stk)):
     t = u["tenant"]
-    async with lock:
+    async with Tx():
         old = DB["products"].get(f"{t}:{code}")
         if not old: raise HTTPException(404, "Not found")
         p = clean({**b, "code": code}, t); p["qty"] = old["qty"]; p["image"] = b.get("image") or old.get("image", "")
@@ -272,7 +298,7 @@ async def edit_product(code: str, b: dict, u=Depends(stk)):
 
 @app.delete("/api/products/{code}")
 async def delete_product(code: str, u=Depends(admin)):
-    async with lock:
+    async with Tx():
         if not DB["products"].pop(f"{u['tenant']}:{code}", None): raise HTTPException(404, "Not found")
         await save()
     return {"deleted": code}
@@ -280,7 +306,7 @@ async def delete_product(code: str, u=Depends(admin)):
 
 @app.post("/api/purchases")
 async def purchase(b: dict, u=Depends(stk)):
-    async with lock:
+    async with Tx():
         p = DB["products"].get(f"{u['tenant']}:{b.get('code')}")
         q = num(b.get("qty"))
         if not p or q <= 0: raise HTTPException(400, "Choose a product and a positive quantity")
@@ -293,7 +319,7 @@ async def purchase(b: dict, u=Depends(stk)):
 @app.post("/api/misc")
 async def misc(b: dict, u=Depends(stk)):
     if b.get("type") not in ("income", "expense") or num(b.get("amount")) <= 0: raise HTTPException(400, "Invalid entry")
-    async with lock:
+    async with Tx():
         DB["misc"].append({"id": uuid.uuid4().hex[:8], "tenant": u["tenant"], "ts": (b.get("date") or now()[:10]) + "T00:00:00Z",
                            "type": b["type"], "amount": num(b["amount"]), "note": b.get("note", ""), "by": u["id"]})
         await save()
@@ -323,7 +349,7 @@ async def sell(b: dict, u=Depends(me), x_tz: str = Header("0")):
     if u["role"] == "super": raise HTTPException(403, "Not permitted")
     pay = b.get("payment", "cash")
     if pay not in ("cash", "card", "transfer"): raise HTTPException(400, "Bad payment type")
-    async with lock:
+    async with Tx():
         root = DB["users"][t]
         if root["wallet"] < SALE_COST: raise HTTPException(402, "Insufficient wallet units. Please top up to continue selling.")
         vat = num(DB["company"].get(t, {}).get("vat"))
@@ -340,21 +366,16 @@ async def sell(b: dict, u=Depends(me), x_tz: str = Header("0")):
             line = round(q * p[tier] * (1 - d / 100), 2); sub += line
             items.append({"code": p["code"], "name": p["name"], "qty": q, "price": p[tier], "disc": d, "line": line, "cost": p["cost"]})
         if not items: raise HTTPException(400, "Cart is empty")
-        prev = {c: DB["products"][f"{t}:{c}"]["qty"] for c in left}
         for c, q in left.items(): DB["products"][f"{t}:{c}"]["qty"] = round(q, 3)
         sub = round(sub, 2); tax = round(sub * vat / 100, 2)
         # daily ticket number: 1, 2, 3 ... for the whole company (all users), restarting at 1 each day; numbers are never reused
-        day = local_day(now(), tzm(x_tz)); cnt = DB["counters"].setdefault(t, {"day": day, "n": 0}); before = dict(cnt)
+        day = local_day(now(), tzm(x_tz)); cnt = DB["counters"].setdefault(t, {"day": day, "n": 0})
         if day > cnt["day"]: cnt["day"], cnt["n"] = day, 0
         cnt["n"] += 1
         sale = {"id": uuid.uuid4().hex[:8].upper(), "tenant": t, "seller": u["id"], "seller_name": u["name"], "ts": now(), "seq": cnt["n"], "day": cnt["day"],
                 "payment": pay, "items": items, "subtotal": sub, "vat": vat, "tax": tax, "total": round(sub + tax, 2)}
         DB["sales"].append(sale); root["wallet"] -= SALE_COST
-        try: await save()
-        except Exception:   # nothing half-done: undo the sale, the stock, the wallet and the ticket number
-            DB["sales"].remove(sale); root["wallet"] += SALE_COST; cnt.update(before)
-            for c, q in prev.items(): DB["products"][f"{t}:{c}"]["qty"] = q
-            raise
+        await save()
     return {"sale": sale, "wallet": root["wallet"]}
 
 
@@ -367,7 +388,7 @@ def sales(u=Depends(me)):
 @app.delete("/api/sales/last")
 async def delete_last(u=Depends(me)):
     if not can(u, "delete_last"): raise HTTPException(403, "Not permitted")
-    async with lock:
+    async with Tx():
         mine = [s for s in DB["sales"] if s["tenant"] == u["tenant"] and (u["role"] == "admin" or s["seller"] == u["id"])]
         if not mine: raise HTTPException(404, "No transaction to delete")
         s = mine[-1]
@@ -382,7 +403,7 @@ async def delete_last(u=Depends(me)):
 @app.post("/api/sales/delete")
 async def delete_sales(b: dict, u=Depends(admin)):
     ids, t = set(map(str, b.get("ids", []))), u["tenant"]
-    async with lock:
+    async with Tx():
         hit = [s for s in DB["sales"] if s["tenant"] == t and s["id"] in ids]
         if not hit: raise HTTPException(404, "No matching transactions")
         if b.get("restock"):
@@ -400,7 +421,7 @@ async def delete_sales(b: dict, u=Depends(admin)):
 async def cleanup(b: dict, u=Depends(admin)):
     before = str(b.get("before", ""))
     if len(before) != 10: raise HTTPException(400, "Choose a date")
-    async with lock:
+    async with Tx():
         gone = [s for s in DB["sales"] if s["tenant"] == u["tenant"] and s["ts"][:10] < before]
         if gone:
             log_delete(u, "cleanup", False, None, {"count": len(gone), "total": round(sum(s["total"] for s in gone), 2), "before": before})
@@ -413,9 +434,9 @@ async def cleanup(b: dict, u=Depends(admin)):
 @app.put("/api/settings")
 async def settings(b: dict, u=Depends(admin), x_tz: str = Header("0")):
     t, c, s = u["tenant"], b.get("company", {}), b.get("system", {})
-    async with lock:
+    async with Tx():
         DB["company"][t] = {k: str(c.get(k, "")) for k in ("name", "address", "phone", "email", "logo")} | {"vat": max(0, num(c.get("vat"))), "show_logo": bool(c.get("show_logo", True)), "invoice_notes": str(c.get("invoice_notes", ""))[:1000]}
-        DB["system"][t] = {"max_tx": int(num(s.get("max_tx"), 50000)), "copies": max(1, int(num(s.get("copies"), 1))),
+        DB["system"][t] = {"max_tx": int(num(s.get("max_tx"), 20000)), "copies": max(1, int(num(s.get("copies"), 1))),
                            "footer": str(s.get("footer", SYS["footer"])),
                            "lang": s.get("lang") if s.get("lang") in ("en", "es") else DB["system"].get(t, SYS)["lang"],
                            "currency": s.get("currency") if s.get("currency") in CURRENCIES else DB["system"].get(t, SYS)["currency"]}
@@ -432,22 +453,84 @@ def backup(u=Depends(admin)):
     return d
 
 
+RESTORE_MAX = 200000
+def _isnum(x): return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x
+def _ists(x): return isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", x) is not None
+
+
+def check_backup(b):
+    """Looks at the WHOLE backup before anything is touched. Returns a list of problems; empty means it is safe to apply."""
+    if not isinstance(b, dict): return ["this is not a StarCoder backup file"]
+    errs = []
+    def rows(k, check, unique="id"):
+        v = b.get(k, [])
+        if not isinstance(v, list): errs.append(f"{k}: must be a list"); return
+        if len(v) > RESTORE_MAX: errs.append(f"{k}: too many records"); return
+        seen = set()
+        for i, r in enumerate(v, 1):
+            if len(errs) >= 8: return
+            if not isinstance(r, dict): errs.append(f"{k} #{i}: not a record"); continue
+            p = check(r)
+            if p: errs.append(f"{k} #{i}: {p}"); continue
+            if unique and r.get(unique) in seen: errs.append(f"{k} #{i}: duplicate {unique}")
+            seen.add(r.get(unique))
+    items_ok = lambda its: isinstance(its, list) and all(isinstance(i, dict) and isinstance(i.get("code"), str) and _isnum(i.get("qty")) for i in its)
+    rows("sales", lambda r: "bad id/date/seller" if not (isinstance(r.get("id"), str) and _ists(r.get("ts")) and isinstance(r.get("seller"), str)) else "bad items" if not items_ok(r.get("items")) else "bad total" if not _isnum(r.get("total")) else None)
+    rows("purchases", lambda r: "bad id/date" if not (isinstance(r.get("id"), str) and _ists(r.get("ts"))) else "bad quantity/total" if not (_isnum(r.get("qty")) and _isnum(r.get("total"))) else None)
+    rows("misc", lambda r: "bad id/date" if not (isinstance(r.get("id"), str) and _ists(r.get("ts"))) else "bad type/amount" if not (r.get("type") in ("income", "expense") and _isnum(r.get("amount"))) else None)
+    rows("deleted", lambda r: "bad id/date" if not (isinstance(r.get("id"), str) and _ists(r.get("ts"))) else None)
+    rows("documents", lambda r: "bad id/number/type" if not (isinstance(r.get("id"), str) and isinstance(r.get("number"), str) and r.get("type") in DOC_TYPES and isinstance(r.get("seq"), int)) else "bad lines/total" if not (isinstance(r.get("items"), list) and _isnum(r.get("total")) and isinstance(r.get("customer"), dict)) else None)
+    def prod(r):
+        if not (isinstance(r.get("code"), str) and r["code"].strip() and isinstance(r.get("name"), str) and r["name"].strip()): return "needs a product code and name"
+        if any(k in r and not _isnum(r[k]) for k in ("cost", "price", "w1", "w2", "discount", "qty", "min", "max")): return "a number field is not a number"
+        if "ptype" in r and r["ptype"] not in ("discrete", "float"): return "bad product type"
+    rows("products", prod, "code")
+    for k in ("company", "system"):
+        if k in b and b[k] is not None and not isinstance(b[k], dict): errs.append(f"{k}: must be an object")
+    return errs
+
+
+def sane_company(d, cur):
+    new = dict(cur)
+    for k, n in (("name", 120), ("address", 200), ("phone", 40), ("email", 120), ("invoice_notes", 1000)):
+        if isinstance(d.get(k), str): new[k] = d[k][:n]
+    if isinstance(d.get("logo"), str) and (d["logo"] == "" or d["logo"].startswith("https://")): new["logo"] = d["logo"][:500]
+    if _isnum(d.get("vat")) and 0 <= d["vat"] <= 100: new["vat"] = float(d["vat"])
+    if isinstance(d.get("show_logo"), bool): new["show_logo"] = d["show_logo"]
+    return new
+def sane_system(d, cur):
+    new = dict(cur)
+    if _isnum(d.get("max_tx")) and d["max_tx"] >= 1: new["max_tx"] = int(d["max_tx"])
+    if _isnum(d.get("copies")) and 1 <= d["copies"] <= 10: new["copies"] = int(d["copies"])
+    if isinstance(d.get("footer"), str): new["footer"] = d["footer"][:200]
+    if d.get("lang") in ("en", "es"): new["lang"] = d["lang"]
+    if d.get("currency") in CURRENCIES: new["currency"] = d["currency"]
+    return new
+
+
 @app.post("/api/restore")
 async def restore(b: dict, u=Depends(admin)):
-    t = u["tenant"]
-    async with lock:
-        for k in ("sales", "purchases", "misc", "deleted", "documents"):
+    t = u["tenant"]; errs = check_backup(b)
+    if errs: raise HTTPException(400, "Backup file is damaged: " + "; ".join(errs[:5]))   # nothing has been touched
+    async with Tx():
+        for k in LISTS:
             DB[k] = [x for x in DB[k] if x["tenant"] != t] + [dict(x, tenant=t) for x in b.get(k, [])]
-        cnt = DB["doc_counters"].setdefault(t, {})   # numbering carries on after the highest restored number, never backwards
+        DB["products"] = {k: v for k, v in DB["products"].items() if v["tenant"] != t}
+        for p in b.get("products", []):
+            q = clean(p, t); q["qty"] = num(p.get("qty")); DB["products"][f"{t}:{q['code']}"] = q
+        if isinstance(b.get("company"), dict): DB["company"][t] = sane_company(b["company"], DB["company"].get(t, {}))
+        if isinstance(b.get("system"), dict): DB["system"][t] = sane_system(b["system"], DB["system"].get(t, SYS))
+        # numbering never falls behind what was restored: no duplicate ticket or document numbers afterwards
+        backfill_seq()   # backups made before ticket numbers existed get them now
+        mine = [s for s in DB["sales"] if s["tenant"] == t and "day" in s]
+        if mine:
+            day = max(s["day"] for s in mine); n = max(s["seq"] for s in mine if s["day"] == day); c = DB["counters"].get(t)
+            if not c or day > c["day"] or (day == c["day"] and n > c["n"]): DB["counters"][t] = {"day": day, "n": n}
+        cnt = DB["doc_counters"].setdefault(t, {})
         for d in DB["documents"]:
             if d["tenant"] == t: cnt[d["type"]] = max(cnt.get(d["type"], 0), d.get("seq", 0))
-        DB["products"] = {k: v for k, v in DB["products"].items() if v["tenant"] != t}
-        for p in b.get("products", []): p["tenant"] = t; DB["products"][f"{t}:{p['code']}"] = p
-        if b.get("company"): DB["company"][t] = b["company"]
-        if b.get("system"): DB["system"][t] = b["system"]
         await save()
     return {"ok": True}
-
 
 
 # ---------- administrator import tool (Excel / JSON rows sent by the browser) ----------
@@ -618,16 +701,12 @@ async def import_data(b: dict, u=Depends(admin)):
     mode, dry, t = ("update" if b.get("mode") == "update" else "add"), bool(b.get("dry_run")), u["tenant"]
     if typ in ("company", "system"): rows = rows[:1]   # these are single records
     out, summ = [], {"add": 0, "update": 0, "skip": 0, "error": 0}
-    async with lock:
-        snap = None if dry else copy.deepcopy({k: DB[k] for k in ("users", "company", "system", "products", "purchases")})
+    async with Tx():
         seen = set()
         for i, r in enumerate(rows, 1):
             st, msg, lab = ("error", "Row is not valid", "-") if not isinstance(r, dict) else HANDLERS[typ](u, t, {nk(k): v for k, v in r.items()}, mode, seen, dry)
             summ[st] += 1; out.append({"row": i, "status": st, "msg": msg, "label": lab})
-        if not dry and (summ["add"] or summ["update"]):
-            try: await save()
-            except Exception:
-                DB.update(snap); raise   # a failed save never leaves a half-applied import in memory
+        if not dry and (summ["add"] or summ["update"]): await save()
     return {"dry_run": dry, "summary": summ, "rows": out[:500], "total": len(out)}
 
 
@@ -678,23 +757,21 @@ async def create_doc(b: dict, u=Depends(docs_ok)):
     typ, t = b.get("type"), u["tenant"]
     if typ not in DOC_TYPES: raise HTTPException(400, "Bad document type")
     body = clean_doc(b)
-    async with lock:
-        cnt = DB["doc_counters"].setdefault(t, {}); before = dict(cnt); cnt[typ] = cnt.get(typ, 0) + 1   # numbers are never reused
+    async with Tx():
+        cnt = DB["doc_counters"].setdefault(t, {}); cnt[typ] = cnt.get(typ, 0) + 1   # numbers are never reused
         sy = DB["system"].get(t, SYS); es = sy.get("lang") == "es"
         pre = {"invoice": "FAC" if es else "INV", "quote": "COT" if es else "QUO"}[typ]
         d = {"id": uuid.uuid4().hex[:8].upper(), "tenant": t, "type": typ, "seq": cnt[typ], "number": f"{pre}-{cnt[typ]:04d}", "ts": now(),
              "by": u["id"], "by_name": u["name"], "currency": sy.get("currency", "NGN"), **body}
         DB["documents"].append(d)
-        try: await save()
-        except Exception:
-            DB["documents"].remove(d); DB["doc_counters"][t] = before; raise
+        await save()
     return d
 
 
 @app.put("/api/documents/{did}")
 async def edit_doc(did: str, b: dict, u=Depends(docs_ok)):
     body = clean_doc(b)
-    async with lock:
+    async with Tx():
         d = next((x for x in DB["documents"] if x["id"] == did and x["tenant"] == u["tenant"]), None)
         if not d or not (u["role"] == "admin" or d["by"] == u["id"]): raise HTTPException(404, "Not found")
         old = dict(d); d.update(body, edited=now())
@@ -706,13 +783,11 @@ async def edit_doc(did: str, b: dict, u=Depends(docs_ok)):
 
 @app.delete("/api/documents/{did}")
 async def delete_doc(did: str, u=Depends(docs_ok)):
-    async with lock:
+    async with Tx():
         d = next((x for x in DB["documents"] if x["id"] == did and x["tenant"] == u["tenant"]), None)
         if not d or not (u["role"] == "admin" or d["by"] == u["id"]): raise HTTPException(404, "Not found")
-        i = DB["documents"].index(d); DB["documents"].remove(d)
-        try: await save()
-        except Exception:
-            DB["documents"].insert(i, d); raise
+        DB["documents"].remove(d)
+        await save()
     return {"deleted": did}
 
 
@@ -725,7 +800,7 @@ def accounts(u=Depends(sup)):
 
 @app.post("/api/accounts/{uid}/active")
 async def acc_active(uid: str, b: dict, u=Depends(sup)):
-    async with lock:
+    async with Tx():
         x = DB["users"].get(uid)
         if not x or x["role"] != "admin": raise HTTPException(404, "Not found")
         x["active"] = bool(b.get("active")); await save()
@@ -735,7 +810,7 @@ async def acc_active(uid: str, b: dict, u=Depends(sup)):
 @app.post("/api/accounts/{uid}/topup")
 async def topup(uid: str, b: dict, u=Depends(sup)):
     n = int(num(b.get("units")))
-    async with lock:
+    async with Tx():
         x = DB["users"].get(uid)
         if not x or x["tenant"] != uid or n <= 0: raise HTTPException(400, "Invalid top-up")
         x["wallet"] += n; await save()
