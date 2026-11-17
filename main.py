@@ -13,6 +13,7 @@ PRIVATE = E("JSONBIN_PRIVATE", "true").lower() != "false"
 SA_ID = E("SUPER_ADMIN_ID", "superadmin")
 SA_PW = E("SUPER_ADMIN_PASSWORD", "SuperAdmin4140#")
 SALE_COST, START_UNITS = 20, 100
+DEFAULT_IMAGE_LIMIT = int(E("DEFAULT_IMAGE_LIMIT", "5"))   # product photos allowed for each NEW account; the Super Administrator can change it per account
 SYS = {"max_tx": 20000, "copies": 1, "footer": "Thanks for purchasing from us today. Please come back.", "lang": "en", "currency": "NGN"}
 CURRENCIES = ("NGN", "PESO", "USD", "EUR", "GBP", "KES", "GHS")
 KEYS = {"users": {}, "company": {}, "system": {}, "products": {}, "sales": [], "purchases": [], "misc": [], "deleted": [], "counters": {}, "documents": [], "doc_counters": {}}
@@ -137,13 +138,23 @@ def sales_today(u, tz):
     return sum(1 for s in DB["sales"] if s["tenant"] == t and s["ts"][:10] in near and (every or s["seller"] == u["id"]) and local_day(s["ts"], tz) == today)
 
 
+def img_limit(t): return DB["users"].get(t, {}).get("image_limit")   # None = unlimited
+def img_used(t): return sum(1 for p in DB["products"].values() if p["tenant"] == t and p.get("image"))
+def img_slot(t, pending=0):
+    """Raises unless this account may put a photo on one more product."""
+    lim = img_limit(t)
+    if lim is not None and img_used(t) + pending + 1 > lim:
+        raise HTTPException(400, f"Image limit reached ({lim} products). Ask the platform administrator to raise it.")
+
+
 def info(u, tz=0):
     t = u["tenant"]; root = DB["users"].get(t)
     return {"user": {k: u[k] for k in ("id", "name", "role", "perms")},
             "company": DB["company"].get(t, {}), "system": DB["system"].get(t, SYS),
             "wallet": root["wallet"] if root else 0,
             "sales_count": sales_today(u, tz) if t else 0,            # today's sales for this user's view
-            "sales_total": sum(1 for s in DB["sales"] if s["tenant"] == t)}   # all stored transactions (clean-up alert)
+            "sales_total": sum(1 for s in DB["sales"] if s["tenant"] == t),
+            "image_limit": root.get("image_limit") if root else None, "images_used": img_used(t) if root else 0}   # all stored transactions (clean-up alert)
 
 
 def new_user(first, last, pw, role, tenant, perms=None):
@@ -154,6 +165,7 @@ def new_user(first, last, pw, role, tenant, perms=None):
     DB["users"][uid] = {"id": uid, "name": f"{first} {last}", "role": role, "pw": hp(pw), "active": True,
                         "tenant": tenant or uid, "wallet": START_UNITS if role == "admin" and not tenant else 0,
                         "perms": perms or {}}
+    if role == "admin" and not tenant: DB["users"][uid]["image_limit"] = DEFAULT_IMAGE_LIMIT
     return uid
 
 
@@ -279,6 +291,8 @@ async def add_product(b: dict, u=Depends(stk)):
         if key in DB["products"]: raise HTTPException(400, "Product code already exists")
         q = num(b.get("qty"))
         if q < 0: raise HTTPException(400, "Quantity cannot be negative")
+        p["image"] = str(p["image"] or "")[:500]
+        if p["image"]: img_slot(t)
         p["qty"] = 0; DB["products"][key] = p
         if q > 0: add_purchase(u, p, q, p["cost"], p["supplier"])   # new product = new purchase transaction
         await save()
@@ -291,7 +305,10 @@ async def edit_product(code: str, b: dict, u=Depends(stk)):
     async with Tx():
         old = DB["products"].get(f"{t}:{code}")
         if not old: raise HTTPException(404, "Not found")
-        p = clean({**b, "code": code}, t); p["qty"] = old["qty"]; p["image"] = b.get("image") or old.get("image", "")
+        p = clean({**b, "code": code}, t); p["qty"] = old["qty"]
+        new_img = "" if b.get("remove_image") else (str(b.get("image") or "")[:500] or old.get("image", ""))
+        if new_img and not old.get("image"): img_slot(t)    # replacing or keeping a photo costs nothing; adding the first one needs a free slot
+        p["image"] = new_img
         DB["products"][f"{t}:{code}"] = p; await save()
     return p
 
@@ -512,6 +529,8 @@ def sane_system(d, cur):
 async def restore(b: dict, u=Depends(admin)):
     t = u["tenant"]; errs = check_backup(b)
     if errs: raise HTTPException(400, "Backup file is damaged: " + "; ".join(errs[:5]))   # nothing has been touched
+    lim, n_img = img_limit(t), sum(1 for p in b.get("products", []) if p.get("image"))
+    if lim is not None and n_img > lim: raise HTTPException(400, f"Image limit reached ({lim} products). The backup has photos on {n_img} products.")
     async with Tx():
         for k in LISTS:
             DB[k] = [x for x in DB[k] if x["tenant"] != t] + [dict(x, tenant=t) for x in b.get(k, [])]
@@ -600,6 +619,10 @@ def imp_product(u, t, nr, mode, seen, dry):
     except ValueError as e: return "error", str(e), code
     key = f"{t}:{code}"; old = DB["products"].get(key)
     if old and mode != "update": return "skip", "Already exists", code
+    if img and not (old and old.get("image")):   # a photo on a product that has none needs a free slot
+        lim = img_limit(t)
+        if lim is not None and img_used(t) + (sum(1 for x in seen if isinstance(x, tuple)) if dry else 0) + 1 > lim: return "error", "Image: limit reached for this account", code
+        if dry: seen.add(("img", code))
     f = {"code": code, "name": name, "cost": cost, "ptype": pt, "price": price, "w1": w1, "w2": w2, "discount": disc,
          "supplier": txt(P("supplier"), 120), "phone": txt(P("phone"), 40), "min": mn, "max": mx, "tenant": t}
     if not dry:
@@ -795,7 +818,7 @@ async def delete_doc(did: str, u=Depends(docs_ok)):
 @app.get("/api/accounts")
 def accounts(u=Depends(sup)):
     return [{"id": x["id"], "name": x["name"], "company": DB["company"].get(x["id"], {}).get("name", ""),
-             "wallet": x["wallet"], "active": x["active"]} for x in DB["users"].values() if x["role"] == "admin" and x["tenant"] == x["id"]]
+             "wallet": x["wallet"], "active": x["active"], "image_limit": x.get("image_limit"), "images_used": img_used(x["id"])} for x in DB["users"].values() if x["role"] == "admin" and x["tenant"] == x["id"]]
 
 
 @app.post("/api/accounts/{uid}/active")
@@ -805,6 +828,21 @@ async def acc_active(uid: str, b: dict, u=Depends(sup)):
         if not x or x["role"] != "admin": raise HTTPException(404, "Not found")
         x["active"] = bool(b.get("active")); await save()
     return {"ok": True}
+
+
+@app.post("/api/accounts/{uid}/images")
+async def set_image_limit(uid: str, b: dict, u=Depends(sup)):
+    v = b.get("limit")
+    if v in (None, "", "unlimited"): lim = None
+    else:
+        try: lim = int(float(v))
+        except Exception: raise HTTPException(400, "Enter a whole number of 0 or more, or choose Unlimited")
+        if lim < 0 or lim > 1000000: raise HTTPException(400, "Enter a whole number of 0 or more, or choose Unlimited")
+    async with Tx():
+        x = DB["users"].get(uid)
+        if not x or x["tenant"] != uid or x["role"] != "admin": raise HTTPException(404, "Not found")
+        x["image_limit"] = lim; await save()   # lowering it below the photos already in use keeps them, but allows no new ones
+    return {"image_limit": lim, "images_used": img_used(uid)}
 
 
 @app.post("/api/accounts/{uid}/topup")
