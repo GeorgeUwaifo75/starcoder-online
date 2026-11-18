@@ -37,6 +37,28 @@ button,input,select{touch-action:manipulation}img{max-width:100%}.g>div{min-widt
 textarea{width:100%;padding:8px;border:1px solid #9ab;border-radius:6px;font:16px system-ui,sans-serif}.docv{overflow-x:auto;border:1px solid #dde;padding:14px;background:#fff;margin-top:12px}
 .dlc{display:block;min-width:0}.dlc>span{display:none;font-size:11px;font-weight:700;color:var(--b)}
 @media(max-width:640px){.dl{grid-template-columns:1fr 1fr 1fr}.dl>.dlc:first-child{grid-column:1/-1}.dlc>span{display:block}.dlh{display:none}.dl .dla{grid-column:span 2}}
+/* ---------- super admin dashboard ---------- */
+.statrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+.stat{background:#eef2fb;border-radius:10px;padding:10px 12px;text-align:center}
+.stat b{display:block;font-size:20px;color:var(--b)}
+.stat span{font-size:12px;color:#555}
+.accgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.acc{border:1px solid #dde;border-radius:12px;padding:12px;background:#fff;display:flex;flex-direction:column}
+.acc.off{background:#fbf6f6;border-color:#f0d5d5}
+.achd{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.acn{min-width:0}
+.acn b{font-size:15px;word-break:break-word}
+.acn small{color:#666}
+.acst{font-size:11px;font-weight:700;padding:3px 10px;border-radius:99px;white-space:none;background:#e3f5e9;color:#0a7d2c;flex:none}
+.acst.off{background:#fdeaea;color:#d32020}
+.acrow{display:flex;gap:6px;align-items:center;margin-top:9px;flex-wrap:wrap}
+.acrow>span{font-size:13px;color:#555}
+.acrow>input{flex:1;min-width:110px}
+.acrow>b{margin-left:auto;font-size:14px}
+.acrow button{flex:none}
+.acfoot{margin-top:12px;display:flex}
+.acfoot button{flex:1}
+@media(max-width:640px){.stat b{font-size:17px}.stat{padding:8px 6px}.accgrid{grid-template-columns:1fr}.acrow>input{min-width:0}}
 </style></head><body><div id="app"></div><div id="bz" class="bz"><span class="spin"></span>Working…</div>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
@@ -399,7 +421,23 @@ const clean=()=>go(async()=>{if(!confirm(LS("This permanently deletes sales befo
 const bk=()=>go(async()=>{const d=await api("/backup"),a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(d)],{type:"application/json"}));a.download="backup-"+new Date().toISOString().slice(0,10)+".json";a.click()});
 const rs=f=>go(async()=>{if(!f||!confirm(LS("Replace ALL current company data with this backup?","¿Reemplazar TODOS los datos actuales de la empresa con esta copia?")))return;await api("/restore","POST",JSON.parse(await f.text()));S={...S,...await api("/me")};P=await api("/products");hdr();alert(T("Restored"))});
 /* ---------- super admin ---------- */
-async function accV(){const a=await api("/accounts"),k=x=>x.id.replace(/\W/g,"_");$("#m").innerHTML=`<div class=card><h3>Administrator accounts</h3>${tbl(["User ID","Name","Company","Wallet","Status","Top up","Product photos","Photo limit",""],a.map(x=>[x.id,x.name,x.company,x.wallet,x.active?"Active":"Disabled",`<!><input id=tu_${k(x)} type=number style="width:90px" placeholder="units"> <button class=y onclick="topup('${x.id}')">Add</button>`,`${x.images_used} / ${x.image_limit==null?"∞":x.image_limit}`,`<!><input id=il_${k(x)} type=number min=0 style="width:80px" value="${x.image_limit==null?"":x.image_limit}" placeholder="limit"> <button class=y onclick="setImg('${x.id}')">Set</button> <button onclick="setImg('${x.id}',1)">Unlimited</button>`,`<!><button onclick="acts('${x.id}',${!x.active})">${x.active?"Deactivate":"Activate"}</button>`]),"stack")}</div>`}
+async function accV(){const a=await api("/accounts"),k=x=>x.id.replace(/\W/g,"_"),act=a.filter(x=>x.active).length,wal=a.reduce((s,x)=>s+(+x.wallet||0),0);
+ $("#m").innerHTML=`<div class=card><h3>Administrator accounts</h3>
+ <div class=statrow>
+  <div class=stat><b>${a.length}</b><span>${LS("Accounts","Cuentas")}</span></div>
+  <div class=stat><b style="color:#0a7d2c">${act}</b><span>${LS("Active","Activas")}</span></div>
+  <div class=stat><b style="color:#d32020">${a.length-act}</b><span>${LS("Disabled","Inactivas")}</span></div>
+  <div class=stat><b>${wal}</b><span>${LS("Units in wallets","Unidades en billeteras")}</span></div>
+ </div>
+ <div class=accgrid>${a.map(x=>`<div class="acc ${x.active?"":"off"}">
+  <div class=achd><div class=acn><b>${E(x.company||x.name)}</b><br><small>${E(x.name)} · ${E(x.id)}</small></div>
+  <span class="acst ${x.active?"":"off"}">${x.active?T("Active"):T("Disabled")}</span></div>
+  <div class=acrow><span>${T("Wallet")}</span><b>${x.wallet} ${T("units")}</b></div>
+  <div class=acrow><input id=tu_${k(x)} type=number min=1 inputmode=numeric placeholder="${LS("Top-up units","Unidades a recargar")}" onkeydown="if(event.key=='Enter')topup('${x.id}')"> <button class=y onclick="topup('${x.id}')">${T("Add")}</button></div>
+  <div class=acrow><span>${LS("Product photos","Fotos de productos")}</span><b>${x.images_used} / ${x.image_limit==null?"∞":x.image_limit}</b></div>
+  <div class=acrow><input id=il_${k(x)} type=number min=0 inputmode=numeric value="${x.image_limit==null?"":x.image_limit}" placeholder="${LS("Photo limit","Límite de fotos")}" onkeydown="if(event.key=='Enter')setImg('${x.id}')"> <button class=y onclick="setImg('${x.id}')">${T("Set")}</button> <button onclick="setImg('${x.id}',1)">${T("Unlimited")}</button></div>
+  <div class=acfoot><button class="${x.active?"d":""}" ${x.active?"":'style="background:#0a7d2c"'} onclick="acts('${x.id}',${!x.active})">${x.active?T("Deactivate"):T("Activate")}</button></div>
+ </div>`).join("")||`<p><i>${LS("No accounts yet.","Aún no hay cuentas.")}</i></p>`}</div></div>`}
 const setImg=(id,unl)=>go(async()=>{await api(`/accounts/${id}/images`,"POST",{limit:unl?null:$("#il_"+id.replace(/\W/g,"_")).value});accV()});
 const topup=id=>go(async()=>{await api(`/accounts/${id}/topup`,"POST",{units:$("#tu_"+id.replace(/\W/g,"_")).value});accV()}),acts=(id,a)=>go(async()=>{await api(`/accounts/${id}/active`,"POST",{active:a});accV()});
 if(TOK)api("/me").then(r=>{S=r;boot()}).catch(authView);else authView();
