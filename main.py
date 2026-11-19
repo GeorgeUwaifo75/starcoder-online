@@ -164,7 +164,7 @@ def new_user(first, last, pw, role, tenant, perms=None):
     while uid in DB["users"]: n += 1; uid = f"{base}{n}"
     DB["users"][uid] = {"id": uid, "name": f"{first} {last}", "role": role, "pw": hp(pw), "active": True,
                         "tenant": tenant or uid, "wallet": START_UNITS if role == "admin" and not tenant else 0,
-                        "perms": perms or {}}
+                        "perms": perms or {}, "created": now()}
     if role == "admin" and not tenant: DB["users"][uid]["image_limit"] = DEFAULT_IMAGE_LIMIT
     return uid
 
@@ -817,8 +817,24 @@ async def delete_doc(did: str, u=Depends(docs_ok)):
 # ---------- super administrator ----------
 @app.get("/api/accounts")
 def accounts(u=Depends(sup)):
-    return [{"id": x["id"], "name": x["name"], "company": DB["company"].get(x["id"], {}).get("name", ""),
-             "wallet": x["wallet"], "active": x["active"], "image_limit": x.get("image_limit"), "images_used": img_used(x["id"])} for x in DB["users"].values() if x["role"] == "admin" and x["tenant"] == x["id"]]
+    """One row per company for the Super Administrator's dashboard: wallet, status, photo limit and simple activity counts (never the business data itself)."""
+    cutoff = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sales, users, prods = {}, {}, {}
+    for s in DB["sales"]:
+        a = sales.setdefault(s["tenant"], [0, 0, ""]); a[0] += 1
+        if s["ts"] >= cutoff: a[1] += 1
+        if s["ts"] > a[2]: a[2] = s["ts"]
+    for x in DB["users"].values():
+        if x["tenant"]: users[x["tenant"]] = users.get(x["tenant"], 0) + 1
+    for p in DB["products"].values(): prods[p["tenant"]] = prods.get(p["tenant"], 0) + 1
+    out = []
+    for x in DB["users"].values():
+        if x["role"] == "admin" and x["tenant"] == x["id"]:
+            s = sales.get(x["id"], [0, 0, ""])
+            out.append({"id": x["id"], "name": x["name"], "company": DB["company"].get(x["id"], {}).get("name", ""), "wallet": x["wallet"], "active": x["active"],
+                        "image_limit": x.get("image_limit"), "images_used": img_used(x["id"]), "sales_total": s[0], "sales_30d": s[1], "last_sale": s[2] or None,
+                        "users": users.get(x["id"], 0), "products": prods.get(x["id"], 0), "created": x.get("created")})
+    return out
 
 
 @app.post("/api/accounts/{uid}/active")
