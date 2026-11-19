@@ -306,6 +306,13 @@ async def edit_product(code: str, b: dict, u=Depends(stk)):
         old = DB["products"].get(f"{t}:{code}")
         if not old: raise HTTPException(404, "Not found")
         p = clean({**b, "code": code}, t); p["qty"] = old["qty"]
+        if b.get("qty") not in (None, ""):
+            q = num(b.get("qty"), -1)
+            if q < 0: raise HTTPException(400, "Quantity cannot be negative")
+            if abs(q - old["qty"]) > 1e-9:   # a real change of the stock figure: only the Administrator may make it
+                if u["role"] != "admin": raise HTTPException(403, "Only the Administrator can change a product's quantity")
+                if p["ptype"] == "discrete" and q != int(q): raise HTTPException(400, "Whole quantities only for this product")
+                p["qty"] = round(q, 3)
         new_img = "" if b.get("remove_image") else (str(b.get("image") or "")[:500] or old.get("image", ""))
         if new_img and not old.get("image"): img_slot(t)    # replacing or keeping a photo costs nothing; adding the first one needs a free slot
         p["image"] = new_img
