@@ -441,15 +441,35 @@ async def delete_sales(b: dict, u=Depends(admin)):
     return {"deleted": len(hit), "wallet": DB["users"][t]["wallet"]}
 
 
-@app.post("/api/cleanup")
-async def cleanup(b: dict, u=Depends(admin)):
+def cleanup_date(b):
     before = str(b.get("before", ""))
-    if len(before) != 10: raise HTTPException(400, "Choose a date")
+    if not day_ok(before): raise HTTPException(400, "Choose a date")
+    return before
+
+
+@app.post("/api/cleanup")
+async def cleanup(b: dict, u=Depends(admin), x_tz: str = Header("0")):
+    """Step 1: delete this company's sales before the chosen day (the user's own local day). Reports how many purchases match the same date, so the screen can offer step 2."""
+    before, tz, t = cleanup_date(b), tzm(x_tz), u["tenant"]
     async with Tx():
-        gone = [s for s in DB["sales"] if s["tenant"] == u["tenant"] and s["ts"][:10] < before]
-        if gone:
-            log_delete(u, "cleanup", False, None, {"count": len(gone), "total": round(sum(s["total"] for s in gone), 2), "before": before})
-        DB["sales"] = [s for s in DB["sales"] if not (s["tenant"] == u["tenant"] and s["ts"][:10] < before)]
+        keep, gone = [], []
+        for s in DB["sales"]: (gone if s["tenant"] == t and local_day(s["ts"], tz) < before else keep).append(s)
+        if gone: log_delete(u, "cleanup", False, None, {"count": len(gone), "total": round(sum(s["total"] for s in gone), 2), "before": before})
+        DB["sales"] = keep
+        await save()
+        waiting = sum(1 for p in DB["purchases"] if p["tenant"] == t and local_day(p["ts"], tz) < before)
+    return {"deleted": len(gone), "purchases": waiting}
+
+
+@app.post("/api/cleanup/purchases")
+async def cleanup_purchases(b: dict, u=Depends(admin), x_tz: str = Header("0")):
+    """Step 2 (only when the Administrator agrees): the same date criteria applied to registered purchases. Product quantities are not touched."""
+    before, tz, t = cleanup_date(b), tzm(x_tz), u["tenant"]
+    async with Tx():
+        keep, gone = [], []
+        for p in DB["purchases"]: (gone if p["tenant"] == t and local_day(p["ts"], tz) < before else keep).append(p)
+        if gone: log_delete(u, "cleanup_purchases", False, None, {"count": len(gone), "total": round(sum(p["total"] for p in gone), 2), "before": before})
+        DB["purchases"] = keep
         await save()
     return {"deleted": len(gone)}
 
